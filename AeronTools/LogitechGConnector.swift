@@ -40,6 +40,9 @@ final class LogitechGConnector {
     private(set) var canControlPerformance = false
     /// The onboard profile the mouse returns to when the app quits.
     private(set) var onboardProfile: Int?
+    /// Analog trigger settings (actuation, rapid trigger, haptics), applied to both keys. Nil if unsupported.
+    private(set) var triggerSettings: HIDPPProtocol.TriggerSettings?
+    private(set) var triggerLimits: HIDPPProtocol.TriggerLimits?
 
     @ObservationIgnored private var hidManager: IOHIDManager?
     @ObservationIgnored private var isManagerOpen = false
@@ -49,6 +52,7 @@ final class LogitechGConnector {
     @ObservationIgnored private var dpiFeatureIndex: UInt8?
     @ObservationIgnored private var reportRateFeatureIndex: UInt8?
     @ObservationIgnored private var onboardFeatureIndex: UInt8?
+    @ObservationIgnored private var triggerFeatureIndex: UInt8?
     @ObservationIgnored private var isInHostMode = false
     @ObservationIgnored private var liftOffDistance: UInt8 = 0
 
@@ -209,7 +213,18 @@ final class LogitechGConnector {
             }
         }
 
+        // The mouse has no trigger getter, so the app always applies known values: the saved ones, or the
+        // onboard profile's on first use. That keeps what Settings shows in line with the mouse.
+        triggerFeatureIndex = await session.featureIndex(for: HIDPPProtocol.featureAnalogTriggers)
+        if let index = triggerFeatureIndex,
+           let reply = await session.request(featureIndex: index, function: 0x00) {
+            triggerLimits = HIDPPProtocol.parseTriggerLimits(reply)
+        }
+
         guard canControlPerformance else { return }
+        if triggerFeatureIndex != nil {
+            setTriggerSettings(savedTriggerSettings ?? .profileDefault)
+        }
         if let saved = savedSetting("dpi"), saved != dpi {
             setDPI(saved)
         }
@@ -243,6 +258,37 @@ final class LogitechGConnector {
             guard let self, self.session === session, reply != nil else { return }
             self.reportRateHz = hz
         }
+    }
+
+    /// Applies trigger settings to both keys (per-key settings are intentionally not offered) and remembers them.
+    func setTriggerSettings(_ requested: HIDPPProtocol.TriggerSettings) {
+        guard let session, let index = triggerFeatureIndex, canControlPerformance else { return }
+        var settings = requested
+        if let limits = triggerLimits {
+            settings.actuation = min(max(settings.actuation, 1), limits.maxActuation)
+            settings.rapidTrigger = min(max(settings.rapidTrigger, 1), limits.maxRapidTrigger)
+            settings.haptics = min(max(settings.haptics, 0), limits.maxHaptics)
+        }
+        if let data = try? JSONEncoder().encode(settings), let key = settingsKey("triggers") {
+            UserDefaults.standard.set(data, forKey: key)
+        }
+        Task { [weak self] in
+            var applied = true
+            for key: UInt8 in [0x00, 0x01] {
+                let reply = await session.request(
+                    featureIndex: index, function: 0x01,
+                    params: HIDPPProtocol.setTriggerParams(key: key, settings)
+                )
+                applied = applied && reply != nil
+            }
+            guard let self, self.session === session, applied else { return }
+            self.triggerSettings = settings
+        }
+    }
+
+    private var savedTriggerSettings: HIDPPProtocol.TriggerSettings? {
+        guard let key = settingsKey("triggers"), let data = UserDefaults.standard.data(forKey: key) else { return nil }
+        return try? JSONDecoder().decode(HIDPPProtocol.TriggerSettings.self, from: data)
     }
 
     /// Hands the mouse back to its onboard profile, so it behaves as configured in G HUB without the app.
@@ -300,6 +346,9 @@ final class LogitechGConnector {
         dpiFeatureIndex = nil
         reportRateFeatureIndex = nil
         onboardFeatureIndex = nil
+        triggerFeatureIndex = nil
+        triggerSettings = nil
+        triggerLimits = nil
         isInHostMode = false
         dpi = nil
         dpiRange = nil
@@ -318,6 +367,9 @@ final class LogitechGConnector {
 
     private func handle(report: [UInt8], from device: IOHIDDevice) {
         guard let session, session.device === device else { return }
+        #if DEBUG
+        HIDPPTrace.record(report)
+        #endif
         session.handle(report: report)
     }
 
@@ -456,6 +508,10 @@ private struct LogitechGSettingsView: View {
                 performanceSection
             }
 
+            if connector.isOnline, let triggers = connector.triggerSettings {
+                triggerSection(triggers)
+            }
+
             if connector.isOnline {
                 Section {
                     if connector.isLoadingFeatures {
@@ -529,11 +585,66 @@ private struct LogitechGSettingsView: View {
         }
     }
 
+    @ViewBuilder
+    private func triggerSection(_ triggers: HIDPPProtocol.TriggerSettings) -> some View {
+        let limits = connector.triggerLimits
+        Section {
+            LevelSlider(title: "Actuation Point", value: triggers.actuation, range: 1...(limits?.maxActuation ?? 10)) {
+                connector.setTriggerSettings(.init(actuation: $0, rapidTrigger: triggers.rapidTrigger, haptics: triggers.haptics))
+            }
+            LevelSlider(title: "Rapid Trigger", value: triggers.rapidTrigger, range: 1...(limits?.maxRapidTrigger ?? 5)) {
+                connector.setTriggerSettings(.init(actuation: triggers.actuation, rapidTrigger: $0, haptics: triggers.haptics))
+            }
+            LevelSlider(title: "Haptic Feedback", value: triggers.haptics, range: 0...(limits?.maxHaptics ?? 5), zeroLabel: "Off") {
+                connector.setTriggerSettings(.init(actuation: triggers.actuation, rapidTrigger: triggers.rapidTrigger, haptics: $0))
+            }
+        } header: {
+            Text("Triggers")
+        } footer: {
+            Text("Applies to both buttons. Lower actuation triggers a click earlier in the press.")
+        }
+        .disabled(!connector.canControlPerformance)
+    }
+
     private var controlFooter: String {
         guard connector.canControlPerformance else {
             return "The mouse is running from its onboard profile, so these can't be changed right now."
         }
         let profile = connector.onboardProfile.map { " \($0)" } ?? ""
         return "While Aeron Tools runs it controls the mouse directly, like G HUB. When it quits, the mouse returns to onboard profile\(profile)."
+    }
+}
+
+/// A whole-number slider that only reports its value when released, so dragging sends one write to the mouse.
+private struct LevelSlider: View {
+    let title: String
+    let value: Int
+    let range: ClosedRange<Int>
+    var zeroLabel: String?
+    let onCommit: (Int) -> Void
+
+    @State private var draft: Double?
+
+    private var shown: Int { draft.map { Int($0.rounded()) } ?? value }
+
+    var body: some View {
+        LabeledContent(title) {
+            HStack(spacing: 10) {
+                Slider(
+                    value: Binding(get: { draft ?? Double(value) }, set: { draft = $0 }),
+                    in: Double(range.lowerBound)...Double(range.upperBound),
+                    step: 1
+                ) { isEditing in
+                    guard !isEditing, let draft else { return }
+                    self.draft = nil
+                    let committed = Int(draft.rounded())
+                    if committed != value { onCommit(committed) }
+                }
+                .frame(width: 180)
+                Text(shown == 0 ? (zeroLabel ?? "0") : "\(shown)")
+                    .monospacedDigit()
+                    .frame(width: 28, alignment: .trailing)
+            }
+        }
     }
 }

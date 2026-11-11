@@ -8,6 +8,8 @@ nonisolated extension HIDPPProtocol {
     static let featureExtendedDPI: UInt16 = 0x2202
     static let featureExtendedReportRate: UInt16 = 0x8061
     static let featureOnboardProfiles: UInt16 = 0x8100
+    /// Inductive analog triggers (PRO X2 SUPERSTRIKE): actuation point, rapid trigger and haptic feedback.
+    static let featureAnalogTriggers: UInt16 = 0x1B0C
 
     // MARK: Extended Adjustable DPI (0x2202)
 
@@ -112,6 +114,56 @@ nonisolated extension HIDPPProtocol {
     /// The rate index `setReportRate` (function 3) expects for a rate in Hz.
     static func reportRateIndex(forHz hz: Int) -> UInt8? {
         reportRatesHz.firstIndex(of: hz).map(UInt8.init)
+    }
+
+    // MARK: Analog Triggers (0x1B0C)
+    //
+    // Mapped by passively tracing G HUB. Function 0 reads the limits; function 1 sets one key as
+    // [key, actuation, rapid trigger, haptics]; there's no getter (G HUB reads the onboard profile instead).
+    // Every value is in quarter steps of the level G HUB shows, e.g. actuation level 5 is sent as 0x14.
+
+    /// Raw units per user-facing level.
+    static let triggerUnitsPerLevel = 4
+
+    /// The trigger settings, as the levels G HUB shows. Applied to both keys alike.
+    struct TriggerSettings: Equatable, Codable, Sendable {
+        /// Actuation point, 1 (shallowest) … 10.
+        var actuation: Int
+        /// Rapid trigger, 1 … 5.
+        var rapidTrigger: Int
+        /// Haptic feedback strength, 0 (off) … 5.
+        var haptics: Int
+
+        /// The PRO X2 SUPERSTRIKE's onboard profile values (`14 08 0C`), used until the user changes anything.
+        static let profileDefault = TriggerSettings(actuation: 5, rapidTrigger: 2, haptics: 3)
+    }
+
+    struct TriggerLimits: Equatable, Sendable {
+        let maxActuation: Int
+        let maxRapidTrigger: Int
+        let maxHaptics: Int
+    }
+
+    /// `getInfo` (function 0): [6] max actuation, [7] max rapid trigger, [8] max haptics, in raw units.
+    static func parseTriggerLimits(_ reply: [UInt8]) -> TriggerLimits? {
+        guard reply.count >= 9, reply[6] > 0 else { return nil }
+        let units = triggerUnitsPerLevel
+        return TriggerLimits(
+            maxActuation: Int(reply[6]) / units,
+            maxRapidTrigger: Int(reply[7]) / units,
+            maxHaptics: Int(reply[8]) / units
+        )
+    }
+
+    /// `setTrigger` (function 1) parameters for one key (0 = left, 1 = right).
+    static func setTriggerParams(key: UInt8, _ settings: TriggerSettings) -> [UInt8] {
+        let units = triggerUnitsPerLevel
+        return [
+            key,
+            UInt8(clamping: settings.actuation * units),
+            UInt8(clamping: settings.rapidTrigger * units),
+            UInt8(clamping: settings.haptics * units)
+        ]
     }
 
     // MARK: Onboard Profiles (0x8100)

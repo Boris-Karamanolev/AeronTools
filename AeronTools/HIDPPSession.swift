@@ -279,6 +279,7 @@ extension HIDPPProtocol {
         case 0x1814: return "Change Host"
         case 0x1815: return "Hosts Info"
         case 0x1B04: return "Reprogrammable Controls v4"
+        case 0x1B0C: return "Analog Triggers"
         case 0x1D4B: return "Wireless Device Status"
         case 0x1F20: return "ADC Measurement"
         case 0x2110: return "SmartShift"

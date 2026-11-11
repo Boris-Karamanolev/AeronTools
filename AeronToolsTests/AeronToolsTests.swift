@@ -387,4 +387,21 @@ struct LogitechGProtocolTests {
         #expect(HIDPPProtocol.reportRateIndex(forHz: 8000) == 6)
         #expect(HIDPPProtocol.reportRateIndex(forHz: 333) == nil)
     }
+
+    @Test("Trigger limits decode from the captured getInfo reply as user-facing levels")
+    func triggerLimits() {
+        // Captured from G HUB reading a PRO X2 SUPERSTRIKE.
+        let reply = packet("11 01 0C 0C 00 03 28 14 14 01 00 00 00 00 00 00 00 00 00 00")
+        #expect(HIDPPProtocol.parseTriggerLimits(reply) == .init(maxActuation: 10, maxRapidTrigger: 5, maxHaptics: 5))
+    }
+
+    @Test("Trigger settings encode as [key, actuation, rapid trigger, haptics] in quarter steps")
+    func triggerSettingsEncoding() {
+        // G HUB sent "00 14 08 08" for actuation 5, rapid trigger 2, haptics 2 on the left key.
+        let settings = HIDPPProtocol.TriggerSettings(actuation: 5, rapidTrigger: 2, haptics: 2)
+        #expect(HIDPPProtocol.setTriggerParams(key: 0, settings) == [0x00, 0x14, 0x08, 0x08])
+        #expect(HIDPPProtocol.setTriggerParams(key: 1, .init(actuation: 10, rapidTrigger: 5, haptics: 0)) == [0x01, 0x28, 0x14, 0x00])
+        // The onboard profile stores 14 08 0C.
+        #expect(HIDPPProtocol.setTriggerParams(key: 0, .profileDefault) == [0x00, 0x14, 0x08, 0x0C])
+    }
 }
