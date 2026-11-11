@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <g fill="#FFFFFF">
+    <!-- Secondary Extended / Wireless Display Card (Upper-Right Depth Layer) -->
+    <rect x="272" y="132" width="620" height="392" rx="64"/>
+    <!-- Primary Studio Display Body -->
+    <rect x="132" y="216" width="688" height="464" rx="70"/>
+    <!-- Sculpted Tapered Stand Neck -->
+    <path d="M424 676 H528 L548 784 H404 Z"/>
+    <!-- Studio Stand Pill Base -->
+    <rect x="332" y="772" width="288" height="44" rx="22"/>
+  </g>
+</svg>

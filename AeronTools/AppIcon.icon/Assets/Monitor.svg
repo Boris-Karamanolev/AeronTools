@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <g fill="#FFFFFF" fill-rule="evenodd">
+    <!-- Primary Studio Display Outer Bezel Frame -->
+    <path d="M202 216 H750 A70 70 0 0 1 820 286 V610 A70 70 0 0 1 750 680 H202 A70 70 0 0 1 132 610 V286 A70 70 0 0 1 202 216 Z M206 254 A36 36 0 0 0 170 290 V606 A36 36 0 0 0 206 642 H746 A36 36 0 0 0 782 606 V290 A36 36 0 0 0 746 254 Z"/>
+
+    <!-- Top Precision Control Slider (Brightness / Display) -->
+    <rect x="228" y="356" width="244" height="36" rx="18"/>
+    <rect x="612" y="356" width="112" height="36" rx="18"/>
+    <path d="M542 318 A56 56 0 1 1 541.9 318 Z M542 350 A24 24 0 1 0 542.1 350 Z"/>
+
+    <!-- Bottom Precision Control Slider (Audio / Power / Thermal) -->
+    <rect x="228" y="504" width="112" height="36" rx="18"/>
+    <rect x="480" y="504" width="244" height="36" rx="18"/>
+    <path d="M410 466 A56 56 0 1 1 409.9 466 Z M410 498 A24 24 0 1 0 410.1 498 Z"/>
+
+    <!-- Wireless Broadcast Signal Waves on Upper-Right Extended Display -->
+    <circle cx="716" cy="276" r="24"/>
+    <path d="M686 218 A92 92 0 0 1 774 306 L746 306 A64 64 0 0 0 686 246 Z"/>
+    <path d="M686 162 A148 148 0 0 1 830 306 L802 306 A120 120 0 0 0 686 190 Z"/>
+  </g>
+</svg>
