@@ -65,27 +65,35 @@ extension MXMasterManager {
         }
     }
 
-    /// Shows the Input Monitoring prompt off the main thread (`IOHIDRequestAccess` blocks until the user answers),
-    /// then polls so access granted later in System Settings is picked up without relaunching.
+    /// Shows the Input Monitoring prompt off the main thread (`IOHIDRequestAccess` blocks until the user answers).
+    /// macOS posts no notification when access is granted, and it's granted in System Settings, so access is
+    /// re-checked each time the user comes back to the app instead of polling.
     private func requestInputMonitoringAccess() {
         Task.detached(priority: .utility) {
             _ = IOHIDRequestAccess(kIOHIDRequestTypeListenEvent)
         }
 
-        guard inputMonitoringTimer == nil else { return }
-        inputMonitoringTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                guard let self else { return }
-                guard IOHIDCheckAccess(kIOHIDRequestTypeListenEvent) == kIOHIDAccessTypeGranted else { return }
-                self.inputMonitoringTimer?.invalidate()
-                self.inputMonitoringTimer = nil
-                self.hasInputMonitoringAccess = true
-                self.openHIDManager()
-                // Force a fresh open + feature probe now that access is granted
-                self.activeHIDDevice = nil
-                self.refreshDeviceState()
-            }
+        guard inputMonitoringObserver == nil else { return }
+        inputMonitoringObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main
+        ) { _ in
+            MainActor.assumeIsolated { MXMasterManager.shared.recheckInputMonitoringAccess() }
         }
+    }
+
+    /// Called on app activation and when the popover opens; a no-op once access is known.
+    func recheckInputMonitoringAccess() {
+        guard !hasInputMonitoringAccess,
+              IOHIDCheckAccess(kIOHIDRequestTypeListenEvent) == kIOHIDAccessTypeGranted else { return }
+        if let inputMonitoringObserver {
+            NotificationCenter.default.removeObserver(inputMonitoringObserver)
+        }
+        inputMonitoringObserver = nil
+        hasInputMonitoringAccess = true
+        openHIDManager()
+        // Force a fresh open + feature probe now that access is granted
+        activeHIDDevice = nil
+        refreshDeviceState()
     }
 
     /// Opens System Settings → Privacy & Security → Input Monitoring.

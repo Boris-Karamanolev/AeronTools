@@ -9,9 +9,9 @@ final class SMCConnection {
     /// An open but idle user client costs nothing, so it's kept for the app's lifetime.
     static let shared = SMCConnection()
 
-    /// Polling cadence shared by the wattage and thermal cards. The SMC refreshes its
-    /// power and temperature keys roughly once per second, so faster polling gains nothing.
-    static let pollInterval: TimeInterval = 1.0
+    /// Polling cadence shared by the wattage and thermal cards (and the menu bar stat). The SMC refreshes
+    /// its keys about once per second; 5 s keeps the readings useful while waking the app far less often.
+    static let pollInterval: TimeInterval = 5.0
 
     private var connection: io_connect_t = 0
     /// Key metadata never changes at runtime, so it's cached to halve the number of SMC calls per read.

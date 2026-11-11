@@ -30,7 +30,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         StatusBarController.shared.start()
         HotKeyManager.shared.start()
         MediaKeyController.shared.setEnabled(DisplayStateModel.shared.mediaKeysControlPointerDisplay)
-        MXMasterManager.shared.start()
+        AccessoryRegistry.startAll()
     }
 
     func applicationWillTerminate(_ notification: Notification) {

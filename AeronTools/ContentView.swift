@@ -102,9 +102,9 @@ public struct ContentView: View {
                 WirelessDisplayCardView()
             }
 
-            // Logitech MX Master 4 Card, only while the mouse is actually connected
-            if model.showAccessoriesCard && MXMasterManager.shared.isConnected {
-                MXMasterCardView()
+            // One card per connected accessory; each appears and disappears as its device connects
+            if model.showAccessoriesCard {
+                AccessoryCardsView()
             }
 
             // Wattage Meter Card
@@ -142,16 +142,9 @@ public struct ContentView: View {
 
 private struct FooterSection: View {
     @Bindable var model: DisplayStateModel
-    @State private var now = Date()
 
+    /// Timed caffeine is rendered separately as a system-driven countdown, so this only covers the static states.
     private var caffeineStatus: String? {
-        if model.isCaffeinated, let end = model.caffeineEndDate {
-            let remaining = max(0, end.timeIntervalSince(now))
-            let formatter = DateComponentsFormatter()
-            formatter.allowedUnits = remaining >= 3600 ? [.hour, .minute] : [.minute, .second]
-            formatter.unitsStyle = .abbreviated
-            return "Awake for \(formatter.string(from: remaining) ?? "")"
-        }
         if model.isCaffeinated {
             return "Awake until turned off"
         }
@@ -163,7 +156,16 @@ private struct FooterSection: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
-            if let status = caffeineStatus {
+            if model.isCaffeinated, let end = model.caffeineEndDate {
+                // Text(timerInterval:) is updated by the system, so the popover never re-renders to tick.
+                Label {
+                    Text("Awake for \(Text(timerInterval: min(Date(), end)...end, countsDown: true))")
+                } icon: {
+                    Image(systemName: "cup.and.heat.waves")
+                }
+                .font(.system(size: 11))
+                .foregroundStyle(.orange)
+            } else if let status = caffeineStatus {
                 Label(status, systemImage: "cup.and.heat.waves")
                     .font(.system(size: 11))
                     .foregroundStyle(.orange)
@@ -188,12 +190,5 @@ private struct FooterSection: View {
             .padding(.top, 2)
         }
         .padding(.horizontal, 2)
-        .task {
-            // The caffeine countdown needs a tick.
-            while !Task.isCancelled {
-                now = Date()
-                try? await Task.sleep(for: .seconds(1))
-            }
-        }
     }
 }

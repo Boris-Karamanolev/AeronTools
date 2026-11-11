@@ -126,6 +126,10 @@ nonisolated final class StreamingWebServer: @unchecked Sendable {
     private var activeConnections: [UUID: NWConnection] = [:]
     private var frameWaiters: [UUID: FrameWaiter] = [:]
     private var mjpegClients: [UUID: MJPEGClient] = [:]
+    /// The long-polling client briefly has no request open between frames, so a recent frame request
+    /// also counts as an active viewer.
+    private var lastFrameRequestTime: CFAbsoluteTime = 0
+    private static let viewerGracePeriod: CFAbsoluteTime = 2.0
 
     private(set) var port: UInt16 = 8080
     private(set) var isRunning: Bool = false
@@ -167,6 +171,16 @@ nonisolated final class StreamingWebServer: @unchecked Sendable {
         stateLock.lock()
         _pipeline = pipeline
         stateLock.unlock()
+    }
+
+    /// Whether any browser is watching: an open MJPEG stream, a waiting long-poll, or a recent frame request.
+    /// Called from the capture queue for every frame, so it only takes the state lock briefly.
+    func hasActiveViewers() -> Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return !mjpegClients.isEmpty
+            || !frameWaiters.isEmpty
+            || CFAbsoluteTimeGetCurrent() - lastFrameRequestTime < Self.viewerGracePeriod
     }
 
     /// Called directly from `ScreenCapturePipeline` on `sampleQueue` as soon as a new JPEG frame is ready.
@@ -380,6 +394,9 @@ nonisolated final class StreamingWebServer: @unchecked Sendable {
 
         // 2. Single JPEG frame endpoint (/frame.jpg?last=42&wait=1)
         if request.path == "/frame.jpg" {
+            stateLock.lock()
+            lastFrameRequestTime = CFAbsoluteTimeGetCurrent()
+            stateLock.unlock()
             let clientLastIndex = UInt64(request.queryItems["last"] ?? "0") ?? 0
             let shouldWait = request.queryItems["wait"] == "1"
             let frame = snapshot.pipeline?.latestFrame()

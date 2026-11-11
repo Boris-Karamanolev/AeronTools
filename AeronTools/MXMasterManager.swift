@@ -32,7 +32,6 @@ public final class MXMasterManager {
             if cardOptions.lowBatteryThreshold != oldValue.lowBatteryThreshold {
                 hasSentLowBatteryAlert = false
             }
-            updateBatteryAlertTimer()
             evaluateLowBatteryAlert()
         }
     }
@@ -53,7 +52,6 @@ public final class MXMasterManager {
         reportedSmartShiftThreshold: nil
     ) {
         didSet {
-            updateBatteryAlertTimer()
             evaluateLowBatteryAlert()
         }
     }
@@ -71,7 +69,7 @@ public final class MXMasterManager {
     @ObservationIgnored var activeDeviceIndex: UInt8 = 0xFF
     @ObservationIgnored var featureTable: [UInt16: UInt8] = [:]
     @ObservationIgnored var pressedDivertedCIDs: Set<UInt16> = []
-    @ObservationIgnored var inputMonitoringTimer: Timer?
+    @ObservationIgnored var inputMonitoringObserver: NSObjectProtocol?
 
     @ObservationIgnored var eventTap: CFMachPort?
     @ObservationIgnored var runLoopSource: CFRunLoopSource?
@@ -79,7 +77,6 @@ public final class MXMasterManager {
     /// round-trips through the main thread.
     @ObservationIgnored var gestureTap: CFMachPort?
     @ObservationIgnored var gestureRunLoopSource: CFRunLoopSource?
-    @ObservationIgnored private var telemetryTimer: Timer?
     @ObservationIgnored private var dpiDebounceTask: Task<Void, Never>?
     @ObservationIgnored private var smartShiftDebounceTask: Task<Void, Never>?
 
@@ -94,7 +91,6 @@ public final class MXMasterManager {
     @ObservationIgnored var smoothScrollTimer: Timer?
 
     // Low-Battery Alert State
-    @ObservationIgnored private var batteryAlertTimer: Timer?
     @ObservationIgnored private var hasSentLowBatteryAlert = false
 
     private init() {
@@ -129,29 +125,19 @@ public final class MXMasterManager {
         setupHIDManager()
         refreshDeviceState()
         updateEventTapState()
-        updateBatteryAlertTimer()
     }
 
+    /// Fetches fresh state once when the card is shown. After that everything is event-driven: the mouse
+    /// broadcasts HID++ battery changes, Bluetooth LE battery arrives via power source notifications, and
+    /// connects/disconnects come from the HID manager callbacks.
     public func startMonitoring() {
         guard !isMonitoring else { return }
         isMonitoring = true
         refreshDeviceState()
-
-        telemetryTimer?.invalidate()
-        telemetryTimer = Timer.scheduledTimer(withTimeInterval: 15.0, repeats: true) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                // Connecting is picked up by the HID matching callback, so only a connected mouse needs refreshing.
-                guard let self, self.isMonitoring, self.isConnected else { return }
-                self.refreshDeviceState()
-            }
-        }
     }
 
     public func stopMonitoring() {
-        guard isMonitoring else { return }
         isMonitoring = false
-        telemetryTimer?.invalidate()
-        telemetryTimer = nil
     }
 
     // MARK: - Persistence & Change Handling
@@ -220,21 +206,6 @@ public final class MXMasterManager {
 
     /// HID++ mice send their own battery events and power-source changes are observed, so only a mouse that
     /// is visible solely through the IORegistry, which posts no change notifications, is still polled.
-    private func updateBatteryAlertTimer() {
-        guard cardOptions.lowBatteryAlertEnabled, isConnected, !snapshot.hidppConnected else {
-            batteryAlertTimer?.invalidate()
-            batteryAlertTimer = nil
-            return
-        }
-        guard batteryAlertTimer == nil else { return }
-        batteryAlertTimer = Timer.scheduledTimer(withTimeInterval: 300.0, repeats: true) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                guard let self, !self.isMonitoring else { return }
-                self.refreshDeviceState()
-            }
-        }
-    }
-
     /// Posts one notification per discharge cycle once the battery reaches the configured threshold.
     private func evaluateLowBatteryAlert() {
         guard let battery = snapshot.batteryPercent else { return }

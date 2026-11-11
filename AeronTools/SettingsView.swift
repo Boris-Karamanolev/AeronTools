@@ -30,7 +30,7 @@ public struct SettingsView: View {
                     Label("Wireless", systemImage: "tv.and.mediabox")
                 }
 
-            MXMasterSettingsTabView()
+            AccessoriesSettingsTabView()
                 .tabItem {
                     Label("Accessories", systemImage: "magicmouse")
                 }
@@ -46,12 +46,9 @@ public struct SettingsView: View {
             TeslaSetupGuideSheet(wireless: wireless)
         }
         .task {
+            // Later changes (e.g. returning from System Settings) are picked up when the app reactivates.
             wireless.refreshPermissions()
             wireless.refreshNetworkInterfaces()
-            while !Task.isCancelled {
-                wireless.refreshPermissions()
-                try? await Task.sleep(for: .seconds(2))
-            }
         }
     }
 

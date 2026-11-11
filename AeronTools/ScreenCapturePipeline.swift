@@ -25,6 +25,10 @@ nonisolated final class ScreenCapturePipeline: NSObject, SCStreamOutput, SCStrea
     private let frameLock = NSLock()
     private var _jpegQuality: Double
     private var latestJPEGData: Data?
+    /// The newest captured frame when it hasn't been encoded yet because nobody was watching.
+    /// Holding one buffer from the stream's pool (depth 3) is safe; it's replaced by each new frame.
+    private var pendingPixelBuffer: CVPixelBuffer?
+    private var lastEncodedByteCount: Int = 0
     private var latestCGImage: CGImage?
     private var frameCounter: UInt64 = 0
     private var lastFPSWindowStart: CFAbsoluteTime = CFAbsoluteTimeGetCurrent()
@@ -34,6 +38,9 @@ nonisolated final class ScreenCapturePipeline: NSObject, SCStreamOutput, SCStrea
 
     /// Invoked immediately on `sampleQueue` whenever a new JPEG frame is encoded.
     var onEncodedFrame: (@Sendable (Data, UInt64) -> Void)?
+    /// Returns `true` while a browser is watching. With no viewers, frames are kept raw and only encoded
+    /// when one is requested, so an idle session costs almost nothing.
+    var hasActiveViewers: (@Sendable () -> Bool)?
     /// Returns `true` when the local macOS Settings window preview is visible and needs a `CGImage`.
     var shouldGeneratePreview: (@Sendable () -> Bool)?
     /// Invoked periodically (~0.75s) with telemetry and an optional downscaled preview `CGImage`.
@@ -75,10 +82,45 @@ nonisolated final class ScreenCapturePipeline: NSObject, SCStreamOutput, SCStrea
         self.frameCounter = 1
     }
 
+    /// The newest frame as JPEG. A frame captured while nobody was watching is encoded here on demand,
+    /// so a viewer that connects while the screen is static still gets the current picture.
     func latestFrame() -> (data: Data?, index: UInt64) {
+        frameLock.lock()
+        guard let pending = pendingPixelBuffer else {
+            defer { frameLock.unlock() }
+            return (latestJPEGData, frameCounter)
+        }
+        let index = frameCounter
+        let quality = _jpegQuality
+        frameLock.unlock()
+
+        guard let jpegData = encodeJPEG(CIImage(cvPixelBuffer: pending), quality: quality) else {
+            return latestFrameWithoutEncoding()
+        }
+
+        frameLock.lock()
+        // A newer frame may have arrived while encoding; only store this one if it's still the latest.
+        if pendingPixelBuffer === pending {
+            pendingPixelBuffer = nil
+            latestJPEGData = jpegData
+            lastEncodedByteCount = jpegData.count
+        }
+        frameLock.unlock()
+        return (jpegData, index)
+    }
+
+    private func latestFrameWithoutEncoding() -> (data: Data?, index: UInt64) {
         frameLock.lock()
         defer { frameLock.unlock() }
         return (latestJPEGData, frameCounter)
+    }
+
+    private func encodeJPEG(_ image: CIImage, quality: Double) -> Data? {
+        ciContext.jpegRepresentation(
+            of: image,
+            colorSpace: rgbColorSpace,
+            options: [kCGImageDestinationLossyCompressionQuality as CIImageRepresentationOption: quality]
+        )
     }
 
     func start() async throws {
@@ -126,6 +168,12 @@ nonisolated final class ScreenCapturePipeline: NSObject, SCStreamOutput, SCStrea
             try? await activeStream.stopCapture()
         }
         stream = nil
+        releasePendingFrame()
+    }
+
+    /// Returns the held capture buffer to the stream's pool. Synchronous so the lock is never held across an await.
+    private func releasePendingFrame() {
+        frameLock.withLock { pendingPixelBuffer = nil }
     }
 
     // MARK: - SCStreamOutput
@@ -146,23 +194,29 @@ nonisolated final class ScreenCapturePipeline: NSObject, SCStreamOutput, SCStrea
         }
 
         let ciImage = CIImage(cvPixelBuffer: imageBuffer)
-        let quality = self.jpegQuality
 
-        guard let jpegData = ciContext.jpegRepresentation(
-            of: ciImage,
-            colorSpace: rgbColorSpace,
-            options: [kCGImageDestinationLossyCompressionQuality as CIImageRepresentationOption: quality]
-        ) else {
-            return
+        // JPEG encoding is the expensive part, so skip it entirely while no browser is watching.
+        var jpegData: Data?
+        if hasActiveViewers?() ?? true {
+            guard let encoded = encodeJPEG(ciImage, quality: self.jpegQuality) else { return }
+            jpegData = encoded
         }
 
         let now = CFAbsoluteTimeGetCurrent()
         var shouldUpdateTelemetry = false
         var currentFPS: Double = 0
         let newIndex: UInt64
+        let byteCount: Int
 
         frameLock.lock()
-        latestJPEGData = jpegData
+        if let jpegData {
+            latestJPEGData = jpegData
+            lastEncodedByteCount = jpegData.count
+            pendingPixelBuffer = nil
+        } else {
+            pendingPixelBuffer = imageBuffer
+        }
+        byteCount = lastEncodedByteCount
         frameCounter &+= 1
         newIndex = frameCounter
         framesInWindow += 1
@@ -179,10 +233,11 @@ nonisolated final class ScreenCapturePipeline: NSObject, SCStreamOutput, SCStrea
         frameLock.unlock()
 
         // Wake any long-polling or MJPEG clients immediately without waiting for a poll timer.
-        onEncodedFrame?(jpegData, newIndex)
+        if let jpegData {
+            onEncodedFrame?(jpegData, newIndex)
+        }
 
         if shouldUpdateTelemetry {
-            let byteCount = jpegData.count
             var previewCG: CGImage?
             if shouldGeneratePreview?() ?? false {
                 let extent = ciImage.extent

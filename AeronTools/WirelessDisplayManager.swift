@@ -195,6 +195,14 @@ public final class WirelessDisplayManager {
             // Direct low-latency injection on `touchManager.eventQueue` without waiting for `@MainActor`
             touchMgr.injectTouch(payload)
         }
+
+        // macOS posts no notification for Screen Recording changes; they're made in System Settings,
+        // so re-check whenever the user comes back to the app.
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main
+        ) { _ in
+            MainActor.assumeIsolated { WirelessDisplayManager.shared.refreshPermissions() }
+        }
     }
 
     // MARK: - Permissions & Network Discovery
@@ -395,6 +403,10 @@ public final class WirelessDisplayManager {
         let server = self.webServer
         newPipeline.onEncodedFrame = { data, index in
             server.notifyNewFrame(data: data, index: index)
+        }
+
+        newPipeline.hasActiveViewers = {
+            server.hasActiveViewers()
         }
 
         newPipeline.shouldGeneratePreview = { [weak self] in

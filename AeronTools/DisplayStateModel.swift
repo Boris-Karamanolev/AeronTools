@@ -326,8 +326,7 @@ public final class DisplayStateModel {
                 model.scheduleSettleChecks()
                 DisplayHardwareManager.shared.reapplyGamma()
                 model.resetBrightnessAutomation()
-                MXMasterManager.shared.refreshDeviceState()
-                MXMasterManager.shared.applyAllSettingsToHardware()
+                AccessoryRegistry.systemDidWake()
             }
         }
 
@@ -368,7 +367,8 @@ public final class DisplayStateModel {
         guard screenOffFallbackTask == nil else { return }
         screenOffFallbackTask = Task {
             while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(5))
+                // Display events normally handle this; the slow check only backs up a missed unplug.
+                try? await Task.sleep(for: .seconds(30))
                 guard !Task.isCancelled else { return }
                 restoreIfRealExternalsGone()
                 refreshDisplays()

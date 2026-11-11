@@ -111,7 +111,11 @@ extension MXMasterManager {
         if let tap = eventTap {
             CGEvent.tapEnable(tap: tap, enable: true)
         }
-        setGestureTapEnabled(isGestureButtonHeld && config.gesturesEnabled)
+        // Only ever enable here. Disabling a tap delivers another tapDisabledByUserInput to this
+        // shared callback, so disabling the idle gesture tap from here loops forever on the main thread.
+        if isGestureButtonHeld && config.gesturesEnabled {
+            setGestureTapEnabled(true)
+        }
     }
 
     // MARK: - Event Handling Logic

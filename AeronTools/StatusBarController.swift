@@ -243,10 +243,13 @@ public final class StatusBarController: NSObject, NSPopoverDelegate {
         if popover.isShown {
             popover.performClose(sender)
         } else {
-            // Make sure display state is up-to-date
+            // Make sure display state is up-to-date. A menu bar app isn't always activated when its
+            // icon is clicked, so permissions granted in System Settings are also picked up here.
             model.refreshDisplays()
+            AccessibilityPermission.shared.refresh()
+            WirelessDisplayManager.shared.refreshPermissions()
             WirelessDisplayManager.shared.refreshNetworkInterfaces()
-            MXMasterManager.shared.refreshDeviceState()
+            AccessoryRegistry.popoverWillShow()
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
             popover.contentViewController?.view.window?.makeKey()
         }
@@ -263,7 +266,7 @@ public final class StatusBarController: NSObject, NSPopoverDelegate {
 
         let wantsWattage = (popoverShown && model.showWattageMeter) || (menuBarVisible && stat.showsWatts)
         let wantsThermals = (popoverShown && model.showThermals) || (menuBarVisible && stat.showsTemperature)
-        let wantsMouse = popoverShown && model.showAccessoriesCard
+        let wantsAccessoryCards = popoverShown && model.showAccessoriesCard
 
         if wantsWattage {
             WattageManager.shared.startMonitoring()
@@ -275,11 +278,7 @@ public final class StatusBarController: NSObject, NSPopoverDelegate {
         } else {
             ThermalManager.shared.stopMonitoring()
         }
-        if wantsMouse {
-            MXMasterManager.shared.startMonitoring()
-        } else {
-            MXMasterManager.shared.stopMonitoring()
-        }
+        AccessoryRegistry.setCardsVisible(wantsAccessoryCards)
     }
 
     // MARK: - NSPopoverDelegate
