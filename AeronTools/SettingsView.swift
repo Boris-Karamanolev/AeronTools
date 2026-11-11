@@ -56,39 +56,27 @@ public struct SettingsView: View {
 
     private var generalTab: some View {
         Form {
-            Section("Menu Bar & Dock") {
-                VStack(alignment: .leading, spacing: 4) {
-                    Toggle("Show icon in menu bar", isOn: Binding(
-                        get: { model.showMenuBarIcon },
-                        set: { newValue in
-                            if !newValue && !model.showDockIcon {
-                                // Don't allow turning off both, keep Dock icon active
-                                model.showDockIcon = true
-                            }
-                            model.showMenuBarIcon = newValue
+            SettingsSection(title: "Menu Bar & Dock", footer: "Aeron Tools always stays reachable: hiding the menu bar icon keeps it in the Dock, and the other way around.") {
+                Toggle("Show icon in menu bar", isOn: Binding(
+                    get: { model.showMenuBarIcon },
+                    set: { newValue in
+                        if !newValue && !model.showDockIcon {
+                            // Don't allow turning off both, keep Dock icon active
+                            model.showDockIcon = true
                         }
-                    ))
-                    Text("Access display brightness, volume, and MacBook screen controls from the macOS menu bar.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-
-                VStack(alignment: .leading, spacing: 4) {
-                    Toggle("Keep icon in Dock", isOn: Binding(
-                        get: { model.showDockIcon },
-                        set: { newValue in
-                            if !newValue && !model.showMenuBarIcon {
-                                // Don't allow turning off both, keep Menu Bar active
-                                model.showMenuBarIcon = true
-                            }
-                            model.showDockIcon = newValue
+                        model.showMenuBarIcon = newValue
+                    }
+                ))
+                Toggle("Keep icon in Dock", isOn: Binding(
+                    get: { model.showDockIcon },
+                    set: { newValue in
+                        if !newValue && !model.showMenuBarIcon {
+                            // Don't allow turning off both, keep Menu Bar active
+                            model.showMenuBarIcon = true
                         }
-                    ))
-                    Text("Shows Aeron Tools in the Dock like a regular application so you can open it at any time.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-
+                        model.showDockIcon = newValue
+                    }
+                ))
                 if model.showMenuBarIcon {
                     Picker("Show next to menu bar icon", selection: $model.menuBarStat) {
                         ForEach(MenuBarStat.allCases) { stat in
@@ -96,102 +84,52 @@ public struct SettingsView: View {
                         }
                     }
                 }
-
-                if !model.showMenuBarIcon {
-                    Text("Note: Because the menu bar icon is hidden, Aeron Tools will remain accessible from your Dock.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .padding(.top, 2)
-                }
-
-                VStack(alignment: .leading, spacing: 4) {
-                    Toggle("Launch at login", isOn: $launchAtLogin)
-                        .onChange(of: launchAtLogin) { _, enabled in
-                            let isEnabled = SMAppService.mainApp.status == .enabled
-                            // Reverting the toggle after a failure re-enters here; don't retry then.
-                            guard enabled != isEnabled else { return }
-                            do {
-                                if enabled {
-                                    try SMAppService.mainApp.register()
-                                } else {
-                                    try SMAppService.mainApp.unregister()
-                                }
-                            } catch {
-                                dlog("Launch at login change failed: \(error.localizedDescription)")
+                Toggle("Launch at login", isOn: $launchAtLogin)
+                    .onChange(of: launchAtLogin) { _, enabled in
+                        let isEnabled = SMAppService.mainApp.status == .enabled
+                        // Reverting the toggle after a failure re-enters here; don't retry then.
+                        guard enabled != isEnabled else { return }
+                        do {
+                            if enabled {
+                                try SMAppService.mainApp.register()
+                            } else {
+                                try SMAppService.mainApp.unregister()
                             }
-                            launchAtLogin = SMAppService.mainApp.status == .enabled
-                            loginItemNeedsApproval = SMAppService.mainApp.status == .requiresApproval
+                        } catch {
+                            dlog("Launch at login change failed: \(error.localizedDescription)")
                         }
-                    Text("Automatically launch Aeron Tools when you log in.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    if loginItemNeedsApproval {
-                        HStack {
-                            Text("Allow Aeron Tools in Login Items to finish setting this up.")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                            Button("Open Login Items…") {
-                                SMAppService.openSystemSettingsLoginItems()
-                            }
-                            .controlSize(.small)
-                        }
+                        launchAtLogin = SMAppService.mainApp.status == .enabled
+                        loginItemNeedsApproval = SMAppService.mainApp.status == .requiresApproval
                     }
+                if loginItemNeedsApproval {
+                    PermissionNotice(
+                        message: "Allow Aeron Tools in Login Items to finish setting this up.",
+                        buttonTitle: "Open Login Items…",
+                        action: { SMAppService.openSystemSettingsLoginItems() }
+                    )
                 }
             }
 
-            Section("System Sleep & Caffeine") {
-                VStack(alignment: .leading, spacing: 4) {
-                    Toggle("Keep Mac awake (Caffeine)", isOn: $model.isCaffeinated)
-                    Text("Prevents display sleep and idle system sleep while enabled. Use the cup's menu in the menu bar popover for a timer.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-
+            SettingsSection(title: "Caffeine", footer: "Prevents display sleep and idle system sleep. Use the cup in the menu bar popover for a timer.") {
+                Toggle("Keep Mac awake", isOn: $model.isCaffeinated)
                 Toggle("Keep awake while an external display is connected", isOn: $model.caffeinateWhileExternalConnected)
                 Toggle("Keep awake while Wireless Display is streaming", isOn: $model.caffeinateWhileStreaming)
                 Toggle("Keep awake while on power adapter", isOn: $model.caffeinateWhileOnPower)
             }
 
-            Section("Popover Cards") {
-                VStack(alignment: .leading, spacing: 4) {
-                    Toggle("Show Wireless Display card in menu bar popover", isOn: $model.showWirelessDisplayCard)
-                    Text("Quickly start or stop the wireless display and copy the stream URL from the menu bar.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-
-                VStack(alignment: .leading, spacing: 4) {
-                    Toggle("Show wattage meter in menu bar popover", isOn: $model.showWattageMeter)
-                    Text("Displays real-time system power consumption and charger wattage while the popover is open.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-
-                Toggle("Show battery health and cycle count", isOn: $model.showBatteryHealth)
+            SettingsSection(title: "Menu Bar Popover", footer: "Choose which cards the popover shows. Power and thermal readings only refresh while they're visible.") {
+                Toggle("Wireless Display", isOn: $model.showWirelessDisplayCard)
+                Toggle("Power & battery", isOn: $model.showWattageMeter)
+                Toggle("Battery health and cycle count", isOn: $model.showBatteryHealth)
                     .disabled(!model.showWattageMeter)
-
-                VStack(alignment: .leading, spacing: 4) {
-                    Toggle("Show thermals in menu bar popover", isOn: $model.showThermals)
-                    Text("Displays CPU, GPU and battery temperatures plus fan speeds while the popover is open.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-
-                VStack(alignment: .leading, spacing: 4) {
-                    Toggle("Show Accessories card in menu bar popover", isOn: $model.showAccessoriesCard)
-                    Text("Shows battery and quick controls for connected accessories. Choose which parts appear in the Accessories tab.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
+                Toggle("Thermals", isOn: $model.showThermals)
+                Toggle("Accessories", isOn: $model.showAccessoriesCard)
             }
 
-            Section("Keyboard Shortcuts") {
+            SettingsSection(title: "Keyboard Shortcuts", footer: "Shortcuts work everywhere, even with the MacBook screen off. Use ⌘, ⌃ or ⌥ in each shortcut.") {
                 ForEach(HotKeyAction.allCases) { action in
                     ShortcutRecorder(action: action)
                 }
-                Text("Shortcuts work everywhere, even with the MacBook screen off. Use ⌘, ⌃ or ⌥ in each shortcut.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)
@@ -202,36 +140,23 @@ public struct SettingsView: View {
     private var displaysTab: some View {
         Form {
             if model.isBuiltinPresent {
-                Section("MacBook Screen") {
+                SettingsSection(title: "MacBook Screen") {
                     // Turn-off controls only matter when another screen can take over (or to turn it back on)
                     if model.canTurnOffBuiltin || model.isBuiltinTurnedOff {
-                        HStack {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text("Current State")
-                                    .font(.body.weight(.medium))
-                                HStack(spacing: 4) {
-                                    Circle()
-                                        .fill(model.isBuiltinTurnedOff ? Color.secondary : Color.green)
-                                        .frame(width: 7, height: 7)
-                                    Text(model.isBuiltinTurnedOff ? "Turned Off" : "Active")
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                }
-                            }
-
-                            Spacer()
-
+                        LabeledContent {
                             Button(model.isBuiltinTurnedOff ? "Turn Screen On" : "Turn Screen Off") {
                                 model.toggleBuiltinDisplay()
                             }
-                            .buttonStyle(.bordered)
                             .disabled(!model.canTurnOffBuiltin && !model.isBuiltinTurnedOff)
+                        } label: {
+                            HStack(spacing: 8) {
+                                StatusDot(isActive: !model.isBuiltinTurnedOff)
+                                Text(model.isBuiltinTurnedOff ? "Turned Off" : "Active")
+                            }
                         }
-
-                        Toggle("Turn off automatically when external screen is connected", isOn: $model.autoTurnOffBuiltin)
+                        Toggle("Turn off automatically when an external screen is connected", isOn: $model.autoTurnOffBuiltin)
                             .disabled(!model.hasExternalDisplays)
-
-                        Toggle("Also turn off keyboard backlight when screen is off", isOn: $model.turnOffKeyboardWithScreen)
+                        Toggle("Also turn off keyboard backlight", isOn: $model.turnOffKeyboardWithScreen)
                     }
 
                     if let builtinID = model.activeBuiltinDisplayID {
@@ -240,84 +165,44 @@ public struct SettingsView: View {
                 }
             }
 
-            Section("Brightness Automation") {
+            SettingsSection(title: "Brightness Automation", footer: brightnessAutomationFooter) {
                 Picker("External displays", selection: $model.brightnessAutomation) {
                     ForEach(BrightnessAutomation.allCases) { automation in
                         Text(automation.title).tag(automation)
                     }
                 }
-
-                switch model.brightnessAutomation {
-                case .off:
-                    EmptyView()
-                case .matchMacBook:
-                    Text("External displays follow the MacBook screen's brightness, including auto-brightness. Paused while the MacBook screen is off.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                case .schedule:
+                if model.brightnessAutomation == .schedule {
                     DatePicker("Night starts", selection: timeBinding(\.scheduleNightStart), displayedComponents: .hourAndMinute)
-                    levelSlider("Night brightness", value: $model.scheduleNightBrightness)
+                    ValueSlider.percent("Night brightness", value: $model.scheduleNightBrightness)
                     DatePicker("Day starts", selection: timeBinding(\.scheduleDayStart), displayedComponents: .hourAndMinute)
-                    levelSlider("Day brightness", value: $model.scheduleDayBrightness)
-                    Text("Applied when night or day begins and when a monitor connects. You can still adjust brightness in between.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    ValueSlider.percent("Day brightness", value: $model.scheduleDayBrightness)
                 }
             }
 
-            Section("Monitor Controls") {
-                VStack(alignment: .leading, spacing: 4) {
-                    Toggle("Restore brightness and volume when a monitor reconnects", isOn: $model.restoreMonitorSettings)
-                    Text("When off, Aeron Tools reads the monitor's current values instead.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
+            SettingsSection(title: "Monitor Controls", footer: "Without restoring, Aeron Tools reads each monitor's current values instead. Extra dimming darkens the picture in software once the monitor is at 0%.") {
+                Toggle("Restore brightness and volume when a monitor reconnects", isOn: $model.restoreMonitorSettings)
                 Toggle("Show input switching in the menu bar popover", isOn: $model.showInputSwitching)
                 Toggle("Show resolution menu in the menu bar popover", isOn: $model.showResolutionMenu)
-                VStack(alignment: .leading, spacing: 4) {
-                    Toggle("Allow extra dimming below minimum brightness", isOn: $model.extraDimmingEnabled)
-                    Text("Darkens the picture in software for dark rooms. Brightness-down continues into it once the monitor is at 0%.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
+                Toggle("Allow extra dimming below minimum brightness", isOn: $model.extraDimmingEnabled)
             }
 
-            Section("Media Keys") {
-                VStack(alignment: .leading, spacing: 4) {
-                    Toggle("Control external monitors with brightness & volume keys", isOn: $model.mediaKeysControlPointerDisplay)
-                    Text("Brightness keys adjust the monitor under the pointer. Volume keys adjust the monitor that sound is playing through.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-
+            SettingsSection(title: "Media Keys", footer: "Brightness keys adjust the monitor under the pointer. Volume keys adjust the monitor sound is playing through.") {
+                Toggle("Control external monitors with brightness & volume keys", isOn: $model.mediaKeysControlPointerDisplay)
                 if model.mediaKeysControlPointerDisplay && !accessibilityPermission.isGranted {
-                    HStack {
-                        Image(systemName: "exclamationmark.triangle.fill")
-                            .foregroundStyle(.yellow)
-                        Text("Accessibility permission is required for media key interception.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        Spacer()
-                        Button("Open Settings…") {
-                            accessibilityPermission.openSystemSettings()
-                        }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
-                    }
+                    PermissionNotice(
+                        message: "Accessibility is needed to intercept media keys.",
+                        buttonTitle: "Open Settings…",
+                        action: accessibilityPermission.openSystemSettings
+                    )
                 }
             }
 
-            Section("Sound") {
-                VStack(alignment: .leading, spacing: 4) {
-                    Toggle("Play sound through monitor when connected", isOn: $model.switchAudioToMonitor)
-                    Text("Only switches when sound is playing through the MacBook speakers, never from headphones or external speakers.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
+            SettingsSection(title: "Sound", footer: "Only switches when sound is playing through the MacBook speakers, never from headphones or external speakers.") {
+                Toggle("Play sound through monitor when connected", isOn: $model.switchAudioToMonitor)
             }
 
             if !model.externalDisplays.isEmpty {
-                Section("Connected External Displays") {
+                SettingsSection(title: "Connected External Displays") {
                     ForEach(model.externalDisplays) { display in
                         VStack(alignment: .leading, spacing: 8) {
                             Text(display.name)
@@ -440,15 +325,14 @@ public struct SettingsView: View {
         )
     }
 
-    private func levelSlider(_ title: String, value: Binding<Float>) -> some View {
-        HStack(spacing: 8) {
-            Text(title)
-            Slider(value: value, in: 0...1)
-                .controlSize(.small)
-            Text("\(Int((value.wrappedValue * 100).rounded()))%")
-                .font(.system(.caption, design: .monospaced))
-                .foregroundStyle(.secondary)
-                .frame(width: 38, alignment: .trailing)
+    private var brightnessAutomationFooter: String? {
+        switch model.brightnessAutomation {
+        case .off:
+            return nil
+        case .matchMacBook:
+            return "External displays follow the MacBook screen's brightness, including auto-brightness. Paused while the MacBook screen is off."
+        case .schedule:
+            return "Applied when night or day begins and when a monitor connects. You can still adjust brightness in between."
         }
     }
 
@@ -496,15 +380,13 @@ private struct WirelessSettingsTabView: View {
 
     var body: some View {
         Form {
-            Section("Wireless Display") {
+            SettingsSection(title: "Wireless Display") {
                 HStack(alignment: .center, spacing: 12) {
                     VStack(alignment: .leading, spacing: 3) {
-                        HStack(spacing: 6) {
-                            Circle()
-                                .fill(wireless.isStreaming ? Color.green : Color.secondary)
-                                .frame(width: 8, height: 8)
-                            Text(wireless.isStreaming ? "Streaming Active" : "Ready to Stream")
-                                .font(.body.weight(.semibold))
+                        HStack(spacing: 8) {
+                            StatusDot(isActive: wireless.isStreaming)
+                            Text(wireless.isStreaming ? "Streaming" : "Ready to Stream")
+                                .font(.headline)
                         }
                         Text(wireless.primaryStreamURL)
                             .font(.system(.caption, design: .monospaced))
@@ -586,7 +468,7 @@ private struct WirelessSettingsTabView: View {
                 }
             }
 
-            Section("Display Configuration") {
+            SettingsSection(title: "Display Configuration", footer: "Touch and pointer control lets the browser move and click the pointer on this Mac.") {
                 Picker("Mode", selection: $wireless.config.sourceType) {
                     ForEach(DisplaySourceType.allCases) { source in
                         Text(source.rawValue).tag(source)
@@ -612,58 +494,38 @@ private struct WirelessSettingsTabView: View {
                     Text("60 FPS (Smooth)").tag(60)
                 }
 
-                HStack {
-                    Text("Stream Quality")
-                    Spacer()
-                    Slider(value: $wireless.config.jpegQuality, in: 0.35...0.92)
-                        .frame(width: 180)
-                    Text("\(Int((wireless.config.jpegQuality * 100).rounded()))%")
-                        .font(.system(.caption, design: .monospaced))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 38, alignment: .trailing)
-                }
+                ValueSlider(
+                    title: "Stream Quality",
+                    value: $wireless.config.jpegQuality,
+                    range: 0.35...0.92,
+                    format: { "\(Int(($0 * 100).rounded()))%" }
+                )
 
                 Toggle("Allow touch & pointer control from browser", isOn: $wireless.config.allowTouch)
             }
 
-            Section("Network & Tesla Hotspot") {
+            SettingsSection(title: "Network & Tesla Hotspot", footer: networkFooter) {
                 Picker("Connection Mode", selection: $wireless.connectionMode) {
                     ForEach(ConnectionMode.allCases) { mode in
                         Text(mode.rawValue).tag(mode)
                     }
                 }
 
-                Text(wireless.connectionMode.subtitle)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-
                 if wireless.connectionMode != .sameNetwork {
-                    HStack {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Tesla Browser Bridge (198.18.0.1)")
-                                .font(.caption.weight(.semibold))
-                            Text("Binds 198.18.0.1 on bridge100 so Tesla Chromium allows local hotspot traffic.")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
+                    LabeledContent("Tesla Browser Bridge") {
+                        HStack(spacing: 6) {
+                            Button("Configure 198.18.0.1") {
+                                wireless.applyTeslaHotspotAliasWithAdminPrompt()
+                            }
+                            Button("Setup Guide…") {
+                                showTeslaSetupSheet = true
+                            }
                         }
-                        Spacer()
-                        Button("Configure 198.18.0.1") {
-                            wireless.applyTeslaHotspotAliasWithAdminPrompt()
-                        }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
-
-                        Button("Setup Guide…") {
-                            showTeslaSetupSheet = true
-                        }
-                        .buttonStyle(.bordered)
                         .controlSize(.small)
                     }
                 }
 
-                HStack {
-                    Text("HTTP Port")
-                    Spacer()
+                LabeledContent("HTTP Port") {
                     TextField(
                         "Port",
                         value: Binding(
@@ -676,50 +538,22 @@ private struct WirelessSettingsTabView: View {
                         ),
                         format: .number.grouping(.never)
                     )
-                    .textFieldStyle(.roundedBorder)
                     .frame(width: 84)
                     .multilineTextAlignment(.trailing)
                     .disabled(wireless.isStreaming)
                 }
             }
 
-            Section("Permissions & Diagnostics") {
-                HStack {
-                    Image(systemName: wireless.hasScreenRecordingPermission ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
-                        .foregroundStyle(wireless.hasScreenRecordingPermission ? .green : .orange)
-                    Text("Screen Recording")
-                    Spacer()
-                    if wireless.hasScreenRecordingPermission {
-                        Text("Granted")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    } else {
-                        Button("Grant Access…") {
-                            wireless.requestScreenRecordingPermission()
-                        }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
-                    }
+            SettingsSection(title: "Permissions", footer: "Screen Recording captures the display for streaming. Accessibility lets the browser control the pointer.") {
+                PermissionStatusRow(title: "Screen Recording", isGranted: wireless.hasScreenRecordingPermission) {
+                    wireless.requestScreenRecordingPermission()
                 }
-
-                HStack {
-                    Image(systemName: accessibilityPermission.isGranted ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
-                        .foregroundStyle(accessibilityPermission.isGranted ? .green : .orange)
-                    Text("Accessibility (Touch & Pointer Input)")
-                    Spacer()
-                    if accessibilityPermission.isGranted {
-                        Text("Granted")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    } else {
-                        Button("Grant Access…") {
-                            accessibilityPermission.request()
-                        }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
-                    }
+                PermissionStatusRow(title: "Accessibility", isGranted: accessibilityPermission.isGranted) {
+                    accessibilityPermission.request()
                 }
+            }
 
+            SettingsSection(title: "Diagnostics") {
                 DisclosureGroup("Session Log (\(wireless.diagnostics.count))", isExpanded: $showDiagnostics) {
                     if wireless.diagnostics.isEmpty {
                         Text("No events logged yet.")
@@ -748,6 +582,14 @@ private struct WirelessSettingsTabView: View {
         .formStyle(.grouped)
         .onAppear { wireless.setPreviewVisible(true) }
         .onDisappear { wireless.setPreviewVisible(false) }
+    }
+
+    private var networkFooter: String {
+        var footer = wireless.connectionMode.subtitle
+        if wireless.connectionMode != .sameNetwork {
+            footer += " The browser bridge binds 198.18.0.1 so Tesla's browser allows local hotspot traffic."
+        }
+        return footer
     }
 
     private func levelColor(_ level: DiagnosticEntry.Level) -> Color {

@@ -131,16 +131,6 @@ extension MXMasterManager {
         identifyReceiverDevice()
     }
 
-    /// Opens System Settings → Privacy & Security → Input Monitoring.
-    public func openInputMonitoringSettings() {
-        if !hasInputMonitoringAccess {
-            requestInputMonitoringAccess()
-        }
-        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent") {
-            NSWorkspace.shared.open(url)
-        }
-    }
-
     /// Scans IOHIDManager, IORegistry, and IOPowerSources to detect the MX Master mouse and query its telemetry.
     public func refreshDeviceState() {
         let registryBattery = Self.readSystemBatteryForLogitechMouse()
@@ -204,13 +194,6 @@ extension MXMasterManager {
                 reportedSmartShiftEnabled: snapshot.reportedSmartShiftEnabled ?? config.smartShiftEnabled,
                 reportedSmartShiftThreshold: snapshot.reportedSmartShiftThreshold ?? config.smartShiftThreshold
             )
-            if !hasInputMonitoringAccess {
-                lastStatusMessage = "Input Monitoring permission needed to talk to the mouse"
-            } else if featureTable.isEmpty {
-                lastStatusMessage = "Connected via \(candidate.transport.rawValue) — waiting for HID++ reply…"
-            } else {
-                lastStatusMessage = "Connected via \(candidate.transport.rawValue)"
-            }
         } else if let registryBattery {
             // Connected via Bluetooth LE where macOS HID event driver owns the device
             isConnected = true
@@ -231,7 +214,6 @@ extension MXMasterManager {
                 reportedSmartShiftEnabled: config.smartShiftEnabled,
                 reportedSmartShiftThreshold: config.smartShiftThreshold
             )
-            lastStatusMessage = "Connected via Bluetooth LE"
         } else {
             isConnected = false
             isIdentified = false
@@ -254,7 +236,6 @@ extension MXMasterManager {
                 reportedSmartShiftEnabled: nil,
                 reportedSmartShiftThreshold: nil
             )
-            lastStatusMessage = "No MX Master detected (connect via Bluetooth or Logi Bolt)"
         }
     }
 

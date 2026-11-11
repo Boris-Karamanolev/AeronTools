@@ -395,13 +395,37 @@ struct LogitechGProtocolTests {
         #expect(HIDPPProtocol.parseTriggerLimits(reply) == .init(maxActuation: 10, maxRapidTrigger: 5, maxHaptics: 5))
     }
 
-    @Test("Trigger settings encode as [key, actuation, rapid trigger, haptics] in quarter steps")
+    @Test("Trigger settings encode as [key, actuation, rapid trigger, haptics]; rapid trigger's bit 0 switches it on")
     func triggerSettingsEncoding() {
-        // G HUB sent "00 14 08 08" for actuation 5, rapid trigger 2, haptics 2 on the left key.
-        let settings = HIDPPProtocol.TriggerSettings(actuation: 5, rapidTrigger: 2, haptics: 2)
-        #expect(HIDPPProtocol.setTriggerParams(key: 0, settings) == [0x00, 0x14, 0x08, 0x08])
-        #expect(HIDPPProtocol.setTriggerParams(key: 1, .init(actuation: 10, rapidTrigger: 5, haptics: 0)) == [0x01, 0x28, 0x14, 0x00])
+        // G HUB sent "00 14 08 08" for actuation 5, rapid trigger off, haptics 2 on the left key.
+        #expect(HIDPPProtocol.setTriggerParams(key: 0, .init(actuation: 5, rapidTrigger: 0, haptics: 2)) == [0x00, 0x14, 0x08, 0x08])
+        // …and 0x09 / 0x05 for rapid trigger on at levels 2 and 1.
+        #expect(HIDPPProtocol.setTriggerParams(key: 0, .init(actuation: 5, rapidTrigger: 2, haptics: 2))[2] == 0x09)
+        #expect(HIDPPProtocol.setTriggerParams(key: 0, .init(actuation: 5, rapidTrigger: 1, haptics: 2))[2] == 0x05)
+        #expect(HIDPPProtocol.setTriggerParams(key: 1, .init(actuation: 10, rapidTrigger: 5, haptics: 0)) == [0x01, 0x28, 0x15, 0x00])
         // The onboard profile stores 14 08 0C.
         #expect(HIDPPProtocol.setTriggerParams(key: 0, .profileDefault) == [0x00, 0x14, 0x08, 0x0C])
+    }
+
+    @Test("Button map keeps every button native except the silenced side buttons")
+    func buttonMap() {
+        // G HUB read the identity map "01 02 03 04 05" from the 5-button mouse.
+        #expect(HIDPPProtocol.buttonMap(buttonCount: 5, silencing: []) == [1, 2, 3, 4, 5])
+        #expect(HIDPPProtocol.buttonMap(buttonCount: 5, silencing: [4]) == [1, 2, 3, 0, 5])
+        #expect(HIDPPProtocol.buttonMap(buttonCount: 5, silencing: [4, 5]) == [1, 2, 3, 0, 0])
+    }
+
+    @Test("Spy events decode the pressed-button mask; replies are ignored")
+    func buttonSpyEvents() throws {
+        // Captured left-button press and release.
+        let press = packet("11 01 0F 00 00 01 00 00 00 00 00 00 00 00 00 00 00 00 00 00")
+        let mask = try #require(HIDPPProtocol.parseButtonSpyEvent(press, expectedFeatureIndex: 0x0F))
+        #expect(HIDPPProtocol.isButtonPressed(1, in: mask))
+        #expect(!HIDPPProtocol.isButtonPressed(4, in: mask))
+        #expect(HIDPPProtocol.isButtonPressed(5, in: 0x0010))
+
+        // G HUB's startSpy reply (function 1) is not a press event.
+        let reply = packet("11 01 0F 1C 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00")
+        #expect(HIDPPProtocol.parseButtonSpyEvent(reply, expectedFeatureIndex: 0x0F) == nil)
     }
 }

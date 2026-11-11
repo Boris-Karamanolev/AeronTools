@@ -256,47 +256,9 @@ final class HIDPPSession {
     }
 }
 
-// MARK: - Feature Names
+// MARK: - Receiver Registers
 
 extension HIDPPProtocol {
     /// HID++ 1.0 sub-ID for reading a long (16-byte) receiver register.
     static let readLongRegister: UInt8 = 0x83
-
-    /// Human-readable names for commonly seen HID++ 2.0 features, for the device's feature list in Settings.
-    static func featureName(_ featureID: UInt16) -> String {
-        switch featureID {
-        case 0x0000: return "Root"
-        case 0x0001: return "Feature Set"
-        case 0x0003: return "Device Information"
-        case 0x0005: return "Device Name"
-        case 0x0007: return "Device Friendly Name"
-        case 0x00C2: return "DFU Control"
-        case 0x00D0: return "DFU"
-        case 0x1000: return "Battery Status"
-        case 0x1001: return "Battery Voltage"
-        case 0x1004: return "Unified Battery"
-        case 0x1300: return "LED Control"
-        case 0x1814: return "Change Host"
-        case 0x1815: return "Hosts Info"
-        case 0x1B04: return "Reprogrammable Controls v4"
-        case 0x1B0C: return "Analog Triggers"
-        case 0x1D4B: return "Wireless Device Status"
-        case 0x1F20: return "ADC Measurement"
-        case 0x2110: return "SmartShift"
-        case 0x2111: return "SmartShift Enhanced"
-        case 0x2121: return "Hi-Res Wheel"
-        case 0x2150: return "Thumbwheel"
-        case 0x2201: return "Adjustable DPI"
-        case 0x2202: return "Extended Adjustable DPI"
-        case 0x8010: return "Gaming G-Keys"
-        case 0x8060: return "Report Rate"
-        case 0x8061: return "Extended Report Rate"
-        case 0x8070: return "Color LED Effects"
-        case 0x8071: return "RGB Effects"
-        case 0x8090: return "Mode Status"
-        case 0x8100: return "Onboard Profiles"
-        case 0x8110: return "Mouse Button Spy"
-        default: return "Unknown"
-        }
-    }
 }

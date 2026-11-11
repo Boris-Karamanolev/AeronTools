@@ -120,7 +120,9 @@ nonisolated extension HIDPPProtocol {
     //
     // Mapped by passively tracing G HUB. Function 0 reads the limits; function 1 sets one key as
     // [key, actuation, rapid trigger, haptics]; there's no getter (G HUB reads the onboard profile instead).
-    // Every value is in quarter steps of the level G HUB shows, e.g. actuation level 5 is sent as 0x14.
+    // Every value is in steps of 4 per level G HUB shows, e.g. actuation level 5 is sent as 0x14.
+    // Rapid trigger also uses bit 0 as its on/off switch: G HUB sent 0x09 (on, level 2), 0x05 (on, level 1)
+    // and 0x08 (off).
 
     /// Raw units per user-facing level.
     static let triggerUnitsPerLevel = 4
@@ -129,13 +131,17 @@ nonisolated extension HIDPPProtocol {
     struct TriggerSettings: Equatable, Codable, Sendable {
         /// Actuation point, 1 (shallowest) … 10.
         var actuation: Int
-        /// Rapid trigger, 1 … 5.
+        /// Rapid trigger, 0 (off) or 1 … 5.
         var rapidTrigger: Int
         /// Haptic feedback strength, 0 (off) … 5.
         var haptics: Int
 
-        /// The PRO X2 SUPERSTRIKE's onboard profile values (`14 08 0C`), used until the user changes anything.
-        static let profileDefault = TriggerSettings(actuation: 5, rapidTrigger: 2, haptics: 3)
+        /// The PRO X2 SUPERSTRIKE's onboard profile values (`14 08 0C`: rapid trigger off), used until the user
+        /// changes anything.
+        static let profileDefault = TriggerSettings(actuation: 5, rapidTrigger: 0, haptics: 3)
+
+        /// The level sent while rapid trigger is off; the device ignores it, and G HUB uses the same.
+        static let rapidTriggerOffLevel = 2
     }
 
     struct TriggerLimits: Equatable, Sendable {
@@ -158,12 +164,42 @@ nonisolated extension HIDPPProtocol {
     /// `setTrigger` (function 1) parameters for one key (0 = left, 1 = right).
     static func setTriggerParams(key: UInt8, _ settings: TriggerSettings) -> [UInt8] {
         let units = triggerUnitsPerLevel
+        let rapidTrigger = settings.rapidTrigger > 0
+            ? settings.rapidTrigger * units | 0x01
+            : TriggerSettings.rapidTriggerOffLevel * units
         return [
             key,
             UInt8(clamping: settings.actuation * units),
-            UInt8(clamping: settings.rapidTrigger * units),
+            UInt8(clamping: rapidTrigger),
             UInt8(clamping: settings.haptics * units)
         ]
+    }
+
+    // MARK: Mouse Button Spy (0x8110)
+    //
+    // Mapped by tracing G HUB: function 0 = button count, 1 = start reporting presses over HID++,
+    // 2 = stop, 3 = get the button map, 4 = set it. The map lists, per physical button, the button number it
+    // reports to macOS; 0 means it reports nothing, so only HID++ sees it. Press events (function 0,
+    // software ID 0) carry a big-endian mask in [4…5], bit n-1 = button n.
+
+    static let featureMouseButtonSpy: UInt16 = 0x8110
+    /// Standard mouse button numbers of the rear and front side buttons.
+    static let backSideButton = 4
+    static let forwardSideButton = 5
+
+    /// The button map: every button reports as itself, except `silenced` ones, which only reach HID++.
+    static func buttonMap(buttonCount: Int, silencing silenced: Set<Int>) -> [UInt8] {
+        (1...max(1, buttonCount)).map { silenced.contains($0) ? 0 : UInt8(clamping: $0) }
+    }
+
+    /// The pressed-button mask from a spy event, or nil if the report isn't one.
+    static func parseButtonSpyEvent(_ report: [UInt8], expectedFeatureIndex: UInt8) -> UInt16? {
+        guard report.count >= 6, report[2] == expectedFeatureIndex, report[3] == 0x00 else { return nil }
+        return (UInt16(report[4]) << 8) | UInt16(report[5])
+    }
+
+    static func isButtonPressed(_ button: Int, in mask: UInt16) -> Bool {
+        (1...16).contains(button) && mask & (1 << (button - 1)) != 0
     }
 
     // MARK: Onboard Profiles (0x8100)

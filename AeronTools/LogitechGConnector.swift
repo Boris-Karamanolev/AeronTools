@@ -26,10 +26,6 @@ final class LogitechGConnector {
     private(set) var isOnline = false
     private(set) var batteryPercent: Int?
     private(set) var isCharging = false
-    /// Every HID++ feature the mouse reports, loaded when its Settings page is opened.
-    private(set) var supportedFeatures: [UInt16] = []
-    private(set) var isLoadingFeatures = false
-    private(set) var hasInputMonitoringAccess = false
 
     // Performance (read from the mouse; nil until it has answered)
     private(set) var dpi: Int?
@@ -43,6 +39,13 @@ final class LogitechGConnector {
     /// Analog trigger settings (actuation, rapid trigger, haptics), applied to both keys. Nil if unsupported.
     private(set) var triggerSettings: HIDPPProtocol.TriggerSettings?
     private(set) var triggerLimits: HIDPPProtocol.TriggerLimits?
+    /// Side button actions. Nil until the mouse is controllable and reports Mouse Button Spy.
+    private(set) var sideButtons: SideButtons?
+
+    struct SideButtons: Codable, Equatable {
+        var back: AccessoryButtonAction = .systemDefault
+        var forward: AccessoryButtonAction = .systemDefault
+    }
 
     @ObservationIgnored private var hidManager: IOHIDManager?
     @ObservationIgnored private var isManagerOpen = false
@@ -53,6 +56,11 @@ final class LogitechGConnector {
     @ObservationIgnored private var reportRateFeatureIndex: UInt8?
     @ObservationIgnored private var onboardFeatureIndex: UInt8?
     @ObservationIgnored private var triggerFeatureIndex: UInt8?
+    @ObservationIgnored private var spyFeatureIndex: UInt8?
+    @ObservationIgnored private var buttonCount = 0
+    /// Press reporting is on and remapped side buttons are silenced to macOS.
+    @ObservationIgnored private var isSpying = false
+    @ObservationIgnored private var lastButtonMask: UInt16 = 0
     @ObservationIgnored private var isInHostMode = false
     @ObservationIgnored private var liftOffDistance: UInt8 = 0
 
@@ -106,8 +114,7 @@ final class LogitechGConnector {
     /// Opening without Input Monitoring would show a blocking permission prompt, so wait until it's granted.
     /// The MX Master connector requests the permission; this one picks up the grant when the popover opens.
     private func openIfPermitted() {
-        hasInputMonitoringAccess = IOHIDCheckAccess(kIOHIDRequestTypeListenEvent) == kIOHIDAccessTypeGranted
-        guard let hidManager, hasInputMonitoringAccess, !isManagerOpen else { return }
+        guard let hidManager, InputMonitoringPermission.isGranted, !isManagerOpen else { return }
         let result = IOHIDManagerOpen(hidManager, IOOptionBits(kIOHIDOptionsTypeNone))
         isManagerOpen = result == kIOReturnSuccess
         if !isManagerOpen {
@@ -221,9 +228,17 @@ final class LogitechGConnector {
             triggerLimits = HIDPPProtocol.parseTriggerLimits(reply)
         }
 
+        spyFeatureIndex = await session.featureIndex(for: HIDPPProtocol.featureMouseButtonSpy)
+        if let index = spyFeatureIndex, let reply = await session.request(featureIndex: index, function: 0x00) {
+            buttonCount = Int(reply[4])
+        }
+
         guard canControlPerformance else { return }
         if triggerFeatureIndex != nil {
             setTriggerSettings(savedTriggerSettings ?? .profileDefault)
+        }
+        if spyFeatureIndex != nil, buttonCount >= HIDPPProtocol.forwardSideButton {
+            setSideButtons(savedSideButtons ?? SideButtons())
         }
         if let saved = savedSetting("dpi"), saved != dpi {
             setDPI(saved)
@@ -266,10 +281,10 @@ final class LogitechGConnector {
         var settings = requested
         if let limits = triggerLimits {
             settings.actuation = min(max(settings.actuation, 1), limits.maxActuation)
-            settings.rapidTrigger = min(max(settings.rapidTrigger, 1), limits.maxRapidTrigger)
+            settings.rapidTrigger = min(max(settings.rapidTrigger, 0), limits.maxRapidTrigger)
             settings.haptics = min(max(settings.haptics, 0), limits.maxHaptics)
         }
-        if let data = try? JSONEncoder().encode(settings), let key = settingsKey("triggers") {
+        if let data = try? JSONEncoder().encode(settings), let key = settingsKey(Self.triggerSettingsKey) {
             UserDefaults.standard.set(data, forKey: key)
         }
         Task { [weak self] in
@@ -286,13 +301,89 @@ final class LogitechGConnector {
         }
     }
 
+    /// v2: rapid trigger 0 means off. v1 never set the on bit, so its rapid trigger was always off in practice.
+    private static let triggerSettingsKey = "triggers.v2"
+
     private var savedTriggerSettings: HIDPPProtocol.TriggerSettings? {
-        guard let key = settingsKey("triggers"), let data = UserDefaults.standard.data(forKey: key) else { return nil }
-        return try? JSONDecoder().decode(HIDPPProtocol.TriggerSettings.self, from: data)
+        let decoder = JSONDecoder()
+        if let key = settingsKey(Self.triggerSettingsKey), let data = UserDefaults.standard.data(forKey: key) {
+            return try? decoder.decode(HIDPPProtocol.TriggerSettings.self, from: data)
+        }
+        guard let key = settingsKey("triggers"), let data = UserDefaults.standard.data(forKey: key),
+              var legacy = try? decoder.decode(HIDPPProtocol.TriggerSettings.self, from: data) else { return nil }
+        legacy.rapidTrigger = 0
+        return legacy
+    }
+
+    // MARK: Side Buttons
+
+    /// Remapped side buttons are silenced to macOS and reported to this app over HID++ instead, so only this
+    /// mouse's buttons trigger the actions. Buttons left at System Default keep working natively, and with
+    /// both at the default nothing is reported to the app at all.
+    func setSideButtons(_ buttons: SideButtons) {
+        guard let session, let index = spyFeatureIndex, canControlPerformance else { return }
+        if let data = try? JSONEncoder().encode(buttons), let key = settingsKey("sideButtons") {
+            UserDefaults.standard.set(data, forKey: key)
+        }
+        var silenced: Set<Int> = []
+        if buttons.back != .systemDefault { silenced.insert(HIDPPProtocol.backSideButton) }
+        if buttons.forward != .systemDefault { silenced.insert(HIDPPProtocol.forwardSideButton) }
+        let map = HIDPPProtocol.buttonMap(buttonCount: buttonCount, silencing: silenced)
+
+        Task { [weak self] in
+            guard let self else { return }
+            var applied = true
+            if silenced.isEmpty {
+                if self.isSpying {
+                    // Restore every button to macOS, then stop reporting presses.
+                    applied = await session.request(featureIndex: index, function: 0x04, params: map) != nil
+                    _ = await session.request(featureIndex: index, function: 0x02)
+                    self.isSpying = false
+                }
+            } else {
+                if !self.isSpying {
+                    applied = await session.request(featureIndex: index, function: 0x01) != nil
+                    self.isSpying = applied
+                }
+                if applied {
+                    applied = await session.request(featureIndex: index, function: 0x04, params: map) != nil
+                }
+            }
+            guard self.session === session, applied else { return }
+            self.lastButtonMask = 0
+            self.sideButtons = buttons
+        }
+    }
+
+    private var savedSideButtons: SideButtons? {
+        guard let key = settingsKey("sideButtons"), let data = UserDefaults.standard.data(forKey: key) else { return nil }
+        return try? JSONDecoder().decode(SideButtons.self, from: data)
+    }
+
+    /// A spy event: act on side buttons that were just pressed (and are remapped).
+    private func handleButtonMask(_ mask: UInt16) {
+        let previous = lastButtonMask
+        lastButtonMask = mask
+        guard let buttons = sideButtons else { return }
+        for (button, action) in [(HIDPPProtocol.backSideButton, buttons.back), (HIDPPProtocol.forwardSideButton, buttons.forward)]
+        where action != .systemDefault
+            && HIDPPProtocol.isButtonPressed(button, in: mask)
+            && !HIDPPProtocol.isButtonPressed(button, in: previous) {
+            AccessoryActions.perform(action)
+        }
     }
 
     /// Hands the mouse back to its onboard profile, so it behaves as configured in G HUB without the app.
     fileprivate func releaseControl() {
+        if let session, let index = spyFeatureIndex, isSpying {
+            // Give every button back to macOS and stop reporting presses before leaving host mode.
+            session.sendWithoutReply(
+                featureIndex: index, function: 0x04,
+                params: HIDPPProtocol.buttonMap(buttonCount: buttonCount, silencing: [])
+            )
+            session.sendWithoutReply(featureIndex: index, function: 0x02)
+            isSpying = false
+        }
         guard let session, let index = onboardFeatureIndex, isInHostMode else { return }
         session.sendWithoutReply(featureIndex: index, function: 0x01, params: [HIDPPProtocol.OnboardMode.onboard.rawValue])
         isInHostMode = false
@@ -335,6 +426,7 @@ final class LogitechGConnector {
               ) else { return }
         if batteryPercent != reading.percentage { batteryPercent = reading.percentage }
         if isCharging != reading.isCharging { isCharging = reading.isCharging }
+        AccessoryBatteryAlerts.shared.report(id: id, name: accessoryName, percent: batteryPercent, isCharging: isCharging)
     }
 
     private func clearDevice(keepSession: Bool = false) {
@@ -349,6 +441,11 @@ final class LogitechGConnector {
         triggerFeatureIndex = nil
         triggerSettings = nil
         triggerLimits = nil
+        spyFeatureIndex = nil
+        buttonCount = 0
+        isSpying = false
+        lastButtonMask = 0
+        sideButtons = nil
         isInHostMode = false
         dpi = nil
         dpiRange = nil
@@ -360,7 +457,6 @@ final class LogitechGConnector {
         isOnline = false
         batteryPercent = nil
         isCharging = false
-        supportedFeatures = []
     }
 
     // MARK: Incoming Reports
@@ -379,31 +475,24 @@ final class LogitechGConnector {
         if event[2] == 0x41 {
             if event[4] & 0x40 != 0 {
                 isOnline = false
-                // The mouse returns to its onboard profile when it powers off; host mode is re-entered on reconnect.
+                // The mouse returns to its onboard profile when it powers off; host mode, press reporting and
+                // the button map are re-applied on reconnect.
                 isInHostMode = false
+                isSpying = false
+                lastButtonMask = 0
                 canControlPerformance = false
             } else {
                 identify()
             }
             return
         }
+        if let index = spyFeatureIndex, let mask = HIDPPProtocol.parseButtonSpyEvent(event, expectedFeatureIndex: index) {
+            handleButtonMask(mask)
+            return
+        }
         // Battery changes the mouse pushes on its own (same layout as the getStatus reply).
         if let feature = batteryFeature, event[2] == feature.index {
             apply(batteryReply: event)
-        }
-    }
-
-    // MARK: Feature List
-
-    /// Loads the full feature list for the Settings page, so unsupported features can be identified and added.
-    func loadFeatureList() {
-        guard let session, isOnline, supportedFeatures.isEmpty, !isLoadingFeatures else { return }
-        isLoadingFeatures = true
-        Task { [weak self] in
-            let features = await session.enumerateFeatures()
-            guard let self, self.session === session else { return }
-            self.supportedFeatures = features
-            self.isLoadingFeatures = false
         }
     }
 }
@@ -416,6 +505,10 @@ extension LogitechGConnector: AccessoryConnector {
     var systemImage: String { "computermouse" }
 
     var isAvailable: Bool { deviceName != nil }
+    var accessoryName: String { deviceName ?? displayName }
+    /// LIGHTSPEED mice are always on a receiver here.
+    var connection: AccessoryConnection? { isAvailable ? .receiver : nil }
+    var isAwake: Bool { isOnline }
 
     func start() {
         setUp()
@@ -442,45 +535,17 @@ extension LogitechGConnector: AccessoryConnector {
     /// Nothing runs on a timer, so there's no card-only work to start or stop.
     func setCardVisible(_ visible: Bool) {}
 
-    func makeCardView() -> AnyView {
-        AnyView(LogitechGCardView(connector: self))
-    }
-
     func makeSettingsView() -> AnyView {
         AnyView(LogitechGSettingsView(connector: self))
     }
 }
 
-// MARK: - Popover Card
+// MARK: - Settings Sections
 
-private struct LogitechGCardView: View {
-    let connector: LogitechGConnector
-
-    var body: some View {
-        AccessoryCardHeader(
-            systemImage: "computermouse.fill",
-            name: connector.deviceName ?? "Logitech G",
-            status: status,
-            isOnline: connector.isOnline,
-            batteryPercent: connector.batteryPercent,
-            isCharging: connector.isCharging
-        )
-        .accessoryCardStyle()
-    }
-
-    private var status: String {
-        guard connector.isOnline else { return "Asleep · LIGHTSPEED Receiver" }
-        let readings = [connector.dpi.map { "\($0) DPI" }, connector.reportRateHz.map(LogitechGSettingsView.rateLabel)]
-            .compactMap { $0 }
-        return readings.isEmpty ? "LIGHTSPEED Receiver" : readings.joined(separator: " · ")
-    }
-}
-
-// MARK: - Settings Page
-
+/// The Logitech G page: device-specific sections only. The Accessories tab adds the device section and
+/// battery alerts, and disables everything while the mouse isn't connected.
 private struct LogitechGSettingsView: View {
     let connector: LogitechGConnector
-    @State private var dpiText = ""
 
     private static let dpiPresets = [400, 800, 1600, 3200, 6400]
 
@@ -489,162 +554,71 @@ private struct LogitechGSettingsView: View {
     }
 
     var body: some View {
-        Form {
-            Section("Device") {
-                LabeledContent("Mouse", value: connector.deviceName ?? "Not connected")
-                LabeledContent("Connection", value: connector.deviceName == nil ? "—"
-                    : connector.isOnline ? "LIGHTSPEED Receiver" : "Asleep (LIGHTSPEED Receiver)")
-                if let percent = connector.batteryPercent {
-                    LabeledContent("Battery", value: connector.isCharging ? "\(percent)% · Charging" : "\(percent)%")
-                }
-                if !connector.hasInputMonitoringAccess {
-                    Text("Input Monitoring permission is needed to talk to the mouse. Grant it from the MX Master page or System Settings.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
-
+        Group {
             if connector.isOnline && (connector.dpi != nil || connector.reportRateHz != nil) {
                 performanceSection
             }
-
             if connector.isOnline, let triggers = connector.triggerSettings {
                 triggerSection(triggers)
             }
-
-            if connector.isOnline {
-                Section {
-                    if connector.isLoadingFeatures {
-                        ProgressView()
-                            .controlSize(.small)
-                    } else {
-                        ForEach(connector.supportedFeatures, id: \.self) { featureID in
-                            LabeledContent(HIDPPProtocol.featureName(featureID), value: String(format: "0x%04X", featureID))
-                        }
-                    }
-                } header: {
-                    Text("Supported HID++ Features")
-                } footer: {
-                    Text("Controls such as the haptic buttons will be added once their features are identified from this list.")
-                }
+            if connector.isOnline, let buttons = connector.sideButtons {
+                sideButtonSection(buttons)
             }
         }
-        .formStyle(.grouped)
-        .onAppear { connector.loadFeatureList() }
-        .onChange(of: connector.isOnline) { _, isOnline in
-            if isOnline { connector.loadFeatureList() }
-        }
-        .onChange(of: connector.dpi, initial: true) { _, dpi in
-            dpiText = dpi.map(String.init) ?? ""
-        }
+        .disabled(!connector.canControlPerformance)
     }
 
-    @ViewBuilder
     private var performanceSection: some View {
-        Section {
+        SettingsSection(title: "Performance", footer: performanceFooter) {
             if let dpi = connector.dpi {
-                LabeledContent("DPI") {
-                    HStack(spacing: 6) {
-                        ForEach(Self.dpiPresets.filter { preset in
-                            connector.dpiRange.map { (($0.minimum)...($0.maximum)).contains(preset) } ?? true
-                        }, id: \.self) { preset in
-                            Button(String(preset)) { connector.setDPI(preset) }
-                                .buttonStyle(.bordered)
-                                .controlSize(.small)
-                                .tint(dpi == preset ? .accentColor : nil)
-                        }
-                        TextField("DPI", text: $dpiText)
-                            .frame(width: 64)
-                            .multilineTextAlignment(.trailing)
-                            .onSubmit {
-                                if let value = Int(dpiText.trimmingCharacters(in: .whitespaces)) {
-                                    connector.setDPI(value)
-                                }
-                            }
-                    }
-                    .disabled(!connector.canControlPerformance)
-                }
+                DPIControl(
+                    dpi: dpi,
+                    presets: Self.dpiPresets,
+                    range: (connector.dpiRange?.minimum ?? 100)...(connector.dpiRange?.maximum ?? 44_000),
+                    onCommit: connector.setDPI
+                )
             }
-
             if let rate = connector.reportRateHz, !connector.supportedReportRates.isEmpty {
                 Picker("Report Rate", selection: Binding(get: { rate }, set: { connector.setReportRate($0) })) {
                     ForEach(connector.supportedReportRates, id: \.self) { hz in
                         Text(Self.rateLabel(hz)).tag(hz)
                     }
                 }
-                .disabled(!connector.canControlPerformance)
-            }
-        } header: {
-            Text("Performance")
-        } footer: {
-            if let range = connector.dpiRange {
-                Text(controlFooter + " DPI \(range.minimum)–\(range.maximum).")
-            } else {
-                Text(controlFooter)
             }
         }
     }
 
-    @ViewBuilder
     private func triggerSection(_ triggers: HIDPPProtocol.TriggerSettings) -> some View {
         let limits = connector.triggerLimits
-        Section {
+        return SettingsSection(title: "Triggers", footer: "Applies to both buttons. Lower actuation triggers a click earlier in the press.") {
             LevelSlider(title: "Actuation Point", value: triggers.actuation, range: 1...(limits?.maxActuation ?? 10)) {
                 connector.setTriggerSettings(.init(actuation: $0, rapidTrigger: triggers.rapidTrigger, haptics: triggers.haptics))
             }
-            LevelSlider(title: "Rapid Trigger", value: triggers.rapidTrigger, range: 1...(limits?.maxRapidTrigger ?? 5)) {
+            LevelSlider(title: "Rapid Trigger", value: triggers.rapidTrigger, range: 0...(limits?.maxRapidTrigger ?? 5), lowestLabel: "Off") {
                 connector.setTriggerSettings(.init(actuation: triggers.actuation, rapidTrigger: $0, haptics: triggers.haptics))
             }
-            LevelSlider(title: "Haptic Feedback", value: triggers.haptics, range: 0...(limits?.maxHaptics ?? 5), zeroLabel: "Off") {
+            LevelSlider(title: "Haptic Feedback", value: triggers.haptics, range: 0...(limits?.maxHaptics ?? 5), lowestLabel: "Off") {
                 connector.setTriggerSettings(.init(actuation: triggers.actuation, rapidTrigger: triggers.rapidTrigger, haptics: $0))
             }
-        } header: {
-            Text("Triggers")
-        } footer: {
-            Text("Applies to both buttons. Lower actuation triggers a click earlier in the press.")
         }
-        .disabled(!connector.canControlPerformance)
     }
 
-    private var controlFooter: String {
+    private func sideButtonSection(_ buttons: LogitechGConnector.SideButtons) -> some View {
+        SettingsSection(title: "Side Buttons", footer: "Only this mouse's side buttons change. System Default keeps the normal back and forward behavior.") {
+            ActionPicker(title: "Back Button", selection: Binding(get: { buttons.back }, set: { action in
+                connector.setSideButtons(.init(back: action, forward: buttons.forward))
+            }))
+            ActionPicker(title: "Forward Button", selection: Binding(get: { buttons.forward }, set: { action in
+                connector.setSideButtons(.init(back: buttons.back, forward: action))
+            }))
+        }
+    }
+
+    private var performanceFooter: String {
         guard connector.canControlPerformance else {
             return "The mouse is running from its onboard profile, so these can't be changed right now."
         }
         let profile = connector.onboardProfile.map { " \($0)" } ?? ""
         return "While Aeron Tools runs it controls the mouse directly, like G HUB. When it quits, the mouse returns to onboard profile\(profile)."
-    }
-}
-
-/// A whole-number slider that only reports its value when released, so dragging sends one write to the mouse.
-private struct LevelSlider: View {
-    let title: String
-    let value: Int
-    let range: ClosedRange<Int>
-    var zeroLabel: String?
-    let onCommit: (Int) -> Void
-
-    @State private var draft: Double?
-
-    private var shown: Int { draft.map { Int($0.rounded()) } ?? value }
-
-    var body: some View {
-        LabeledContent(title) {
-            HStack(spacing: 10) {
-                Slider(
-                    value: Binding(get: { draft ?? Double(value) }, set: { draft = $0 }),
-                    in: Double(range.lowerBound)...Double(range.upperBound),
-                    step: 1
-                ) { isEditing in
-                    guard !isEditing, let draft else { return }
-                    self.draft = nil
-                    let committed = Int(draft.rounded())
-                    if committed != value { onCommit(committed) }
-                }
-                .frame(width: 180)
-                Text(shown == 0 ? (zeroLabel ?? "0") : "\(shown)")
-                    .monospacedDigit()
-                    .frame(width: 28, alignment: .trailing)
-            }
-        }
     }
 }

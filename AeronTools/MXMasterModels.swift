@@ -92,49 +92,6 @@ public enum MXThumbwheelAction: String, CaseIterable, Codable, Identifiable, Sen
     }
 }
 
-/// Action assignable to MX Master buttons or directional hold-and-drag gestures.
-public enum MXButtonAction: String, CaseIterable, Codable, Identifiable, Sendable {
-    case systemDefault
-    case missionControl
-    case appExpose
-    case showDesktop
-    case launchpad
-    case spaceLeft
-    case spaceRight
-    case navigateBack
-    case navigateForward
-    case playPause
-    case mutePointerDisplay
-    case toggleMacBookScreen
-    case toggleCaffeine
-    case toggleWheelMode
-    case copy
-    case paste
-
-    public var id: String { rawValue }
-
-    public var title: String {
-        switch self {
-        case .systemDefault: return "System Default"
-        case .missionControl: return "Mission Control"
-        case .appExpose: return "App Exposé"
-        case .showDesktop: return "Show Desktop"
-        case .launchpad: return "Launchpad"
-        case .spaceLeft: return "Move a Space Left"
-        case .spaceRight: return "Move a Space Right"
-        case .navigateBack: return "Back (⌘[)"
-        case .navigateForward: return "Forward (⌘])"
-        case .playPause: return "Play / Pause Media"
-        case .mutePointerDisplay: return "Mute Display Under Pointer"
-        case .toggleMacBookScreen: return "Toggle MacBook Screen"
-        case .toggleCaffeine: return "Toggle Caffeine"
-        case .toggleWheelMode: return "Toggle Ratchet / Free-Spin"
-        case .copy: return "Copy (⌘C)"
-        case .paste: return "Paste (⌘V)"
-        }
-    }
-}
-
 /// Persisted user configuration for the MX Master 4.
 public struct MXMasterConfig: Codable, Equatable, Sendable {
     public var dpi: Int = 1600
@@ -153,20 +110,20 @@ public struct MXMasterConfig: Codable, Equatable, Sendable {
     public var thumbwheelAction: MXThumbwheelAction = .horizontalScroll
     public var invertThumbwheel: Bool = false
 
-    public var middleButtonAction: MXButtonAction = .systemDefault
-    public var backButtonAction: MXButtonAction = .navigateBack
-    public var forwardButtonAction: MXButtonAction = .navigateForward
-    public var gestureButtonClickAction: MXButtonAction = .missionControl
+    public var middleButtonAction: AccessoryButtonAction = .systemDefault
+    public var backButtonAction: AccessoryButtonAction = .navigateBack
+    public var forwardButtonAction: AccessoryButtonAction = .navigateForward
+    public var gestureButtonClickAction: AccessoryButtonAction = .missionControl
     /// Button behind the scroll wheel; `.systemDefault` keeps the hardware Ratchet / Free-Spin toggle.
-    public var modeShiftButtonAction: MXButtonAction = .systemDefault
+    public var modeShiftButtonAction: AccessoryButtonAction = .systemDefault
     /// Haptic sense panel under the thumb.
-    public var hapticPanelButtonAction: MXButtonAction = .systemDefault
+    public var hapticPanelButtonAction: AccessoryButtonAction = .systemDefault
 
     public var gesturesEnabled: Bool = true
-    public var gestureUpAction: MXButtonAction = .missionControl
-    public var gestureDownAction: MXButtonAction = .appExpose
-    public var gestureLeftAction: MXButtonAction = .spaceLeft
-    public var gestureRightAction: MXButtonAction = .spaceRight
+    public var gestureUpAction: AccessoryButtonAction = .missionControl
+    public var gestureDownAction: AccessoryButtonAction = .appExpose
+    public var gestureLeftAction: AccessoryButtonAction = .spaceLeft
+    public var gestureRightAction: AccessoryButtonAction = .spaceRight
 
     public init() {}
 
@@ -211,32 +168,6 @@ public struct MXMasterConfig: Codable, Equatable, Sendable {
     /// Clamps SmartShift threshold to valid HID++ range (1...50).
     nonisolated public static func clampedSmartShiftThreshold(_ raw: Int) -> Int {
         min(50, max(1, raw))
-    }
-}
-
-/// Which sections of the menu bar popover card are visible, plus the low-battery alert preference.
-public struct MXMasterCardOptions: Codable, Equatable, Sendable {
-    public var showBatteryBar: Bool = true
-    public var showWheelControls: Bool = true
-    public var showDPIControls: Bool = true
-    public var showThumbwheel: Bool = true
-
-    public var lowBatteryAlertEnabled: Bool = true
-    /// Battery percentage at or below which a notification is posted (5...50).
-    public var lowBatteryThreshold: Int = 15
-
-    public init() {}
-
-    /// Decodes leniently so newly added options fall back to defaults instead of discarding saved settings.
-    public init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        let defaults = MXMasterCardOptions()
-        showBatteryBar = try container.decodeIfPresent(Bool.self, forKey: .showBatteryBar) ?? defaults.showBatteryBar
-        showWheelControls = try container.decodeIfPresent(Bool.self, forKey: .showWheelControls) ?? defaults.showWheelControls
-        showDPIControls = try container.decodeIfPresent(Bool.self, forKey: .showDPIControls) ?? defaults.showDPIControls
-        showThumbwheel = try container.decodeIfPresent(Bool.self, forKey: .showThumbwheel) ?? defaults.showThumbwheel
-        lowBatteryAlertEnabled = try container.decodeIfPresent(Bool.self, forKey: .lowBatteryAlertEnabled) ?? defaults.lowBatteryAlertEnabled
-        lowBatteryThreshold = try container.decodeIfPresent(Int.self, forKey: .lowBatteryThreshold) ?? defaults.lowBatteryThreshold
     }
 }
 
