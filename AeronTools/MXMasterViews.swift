@@ -4,6 +4,7 @@ import ApplicationServices
 
 // MARK: - Popover Card: MXMasterCardView
 
+/// Shown in the popover only while the mouse is connected.
 public struct MXMasterCardView: View {
     @Bindable var manager = MXMasterManager.shared
 
@@ -13,7 +14,7 @@ public struct MXMasterCardView: View {
 
     public var body: some View {
         let snapshot = manager.snapshot
-        let tint: Color = manager.isConnected ? .accentColor : .secondary
+        let tint = Color.accentColor
         let options = manager.cardOptions
 
         VStack(alignment: .leading, spacing: 10) {
@@ -36,7 +37,7 @@ public struct MXMasterCardView: View {
 
                     HStack(spacing: 4) {
                         Circle()
-                            .fill(manager.isConnected ? Color.green : Color.secondary.opacity(0.5))
+                            .fill(Color.green)
                             .frame(width: 5, height: 5)
                         Text(snapshot.transport.rawValue)
                             .font(.system(size: 11))
