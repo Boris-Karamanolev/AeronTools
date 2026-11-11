@@ -71,6 +71,11 @@ public final class WirelessDisplayManager {
     @ObservationIgnored private let webServer = StreamingWebServer()
     @ObservationIgnored private let touchManager = TouchInjectionManager()
     @ObservationIgnored private var pipeline: ScreenCapturePipeline?
+    /// Bumped by every start, stop, and rebuild. Async work that resumes with an older value has been
+    /// superseded and must discard what it created instead of installing it.
+    @ObservationIgnored private var sessionGeneration: UInt64 = 0
+    /// The most recently scheduled rebuild; rebuilds run one at a time.
+    @ObservationIgnored private var rebuildTask: Task<Void, Never>?
     @ObservationIgnored private let previewVisibilityLock = NSLock()
     @ObservationIgnored private nonisolated(unsafe) var _isPreviewVisible: Bool = false
 
@@ -159,9 +164,20 @@ public final class WirelessDisplayManager {
             oldConfig.fps != config.fps
 
         if needsRebuild {
-            Task { @MainActor in
-                await self.rebuildPipelineWhileStreaming()
-            }
+            scheduleRebuild()
+        }
+    }
+
+    /// Queues a rebuild behind any in-flight one. Rapid config changes coalesce: superseded
+    /// rebuilds are skipped, and one already in flight discards its result when it finishes.
+    private func scheduleRebuild() {
+        sessionGeneration &+= 1
+        let generation = sessionGeneration
+        let previous = rebuildTask
+        rebuildTask = Task { @MainActor [weak self] in
+            await previous?.value
+            guard let self, generation == self.sessionGeneration else { return }
+            await self.rebuildPipelineWhileStreaming(generation: generation)
         }
     }
 
@@ -228,7 +244,13 @@ public final class WirelessDisplayManager {
 
         log(.info, "Starting Wireless Display (\(config.preset.shortName)) in [\(connectionMode.rawValue)] mode…")
 
-        let (displayID, createdPipeline) = await createAndStartPipeline(for: config)
+        sessionGeneration &+= 1
+        let generation = sessionGeneration
+        let (displayID, createdPipeline, createdVirtualDisplay) = await createAndStartPipeline(for: config)
+        guard generation == sessionGeneration else {
+            await discardSupersededPipeline(createdPipeline, virtualDisplay: createdVirtualDisplay)
+            return
+        }
         self.activeDisplayID = displayID
         self.pipeline = createdPipeline
         self.touchManager.updateTarget(displayID: displayID, isEnabled: config.allowTouch)
@@ -257,6 +279,9 @@ public final class WirelessDisplayManager {
             isStartingOrStopping = false
             StatusBarController.shared.updateIcon()
         }
+
+        // Invalidate any in-flight rebuild so it tears down its pipeline instead of installing it.
+        sessionGeneration &+= 1
 
         // Safety check: if the built-in MacBook screen was turned off and no physical external displays
         // are connected, restore the built-in screen before detaching the virtual display.
@@ -293,12 +318,14 @@ public final class WirelessDisplayManager {
         isStreaming = false
     }
 
-    private func rebuildPipelineWhileStreaming() async {
+    private func rebuildPipelineWhileStreaming(generation: UInt64) async {
         guard isStreaming else { return }
 
         if let existing = pipeline {
             await existing.stop()
         }
+        // A stop or newer rebuild during the await above owns the session state now.
+        guard generation == sessionGeneration else { return }
         pipeline = nil
         virtualDisplayManager.destroyVirtualDisplay()
         previewImage = nil
@@ -306,7 +333,11 @@ public final class WirelessDisplayManager {
         frameKB = 0
         activeDisplayID = nil
 
-        let (displayID, newPipeline) = await createAndStartPipeline(for: config)
+        let (displayID, newPipeline, newVirtualDisplay) = await createAndStartPipeline(for: config)
+        guard generation == sessionGeneration else {
+            await discardSupersededPipeline(newPipeline, virtualDisplay: newVirtualDisplay)
+            return
+        }
         activeDisplayID = displayID
         pipeline = newPipeline
         touchManager.updateTarget(displayID: displayID, isEnabled: config.allowTouch)
@@ -315,7 +346,21 @@ public final class WirelessDisplayManager {
         syncLiveServerConfig()
     }
 
-    private func createAndStartPipeline(for config: WirelessDisplayConfig) async -> (CGDirectDisplayID, ScreenCapturePipeline) {
+    /// Stops a pipeline whose session was stopped or superseded while it was starting, so its
+    /// capture doesn't keep encoding frames in the background. The virtual display is only
+    /// destroyed if it is still the one this pipeline created; virtual display IDs can be reused,
+    /// so identity is compared rather than the display ID.
+    private func discardSupersededPipeline(_ stalePipeline: ScreenCapturePipeline, virtualDisplay: NSObject?) async {
+        await stalePipeline.stop()
+        if let virtualDisplay, virtualDisplayManager.activeDisplay?.backingObject === virtualDisplay {
+            virtualDisplayManager.destroyVirtualDisplay()
+        }
+    }
+
+    private func createAndStartPipeline(
+        for config: WirelessDisplayConfig
+    ) async -> (CGDirectDisplayID, ScreenCapturePipeline, virtualDisplay: NSObject?) {
+        var createdVirtualDisplay: NSObject?
         let targetDisplayID: CGDirectDisplayID
         if config.sourceType == .virtualExtended {
             if let vID = virtualDisplayManager.createVirtualDisplay(
@@ -326,6 +371,7 @@ public final class WirelessDisplayManager {
                 refreshRate: Double(config.fps)
             ) {
                 targetDisplayID = vID
+                createdVirtualDisplay = virtualDisplayManager.activeDisplay?.backingObject
                 log(.success, "Created Virtual Display (ID \(vID)) · \(config.logicalWidth)×\(config.logicalHeight)")
             } else {
                 targetDisplayID = CGMainDisplayID()
@@ -379,7 +425,7 @@ public final class WirelessDisplayManager {
             log(.warning, "Live capture awaiting Screen Recording permission (\(error.localizedDescription)). Serving test pattern.")
         }
 
-        return (targetDisplayID, newPipeline)
+        return (targetDisplayID, newPipeline, createdVirtualDisplay)
     }
 
     // MARK: - Tesla Hotspot Bridge Helper (`198.18.0.1` Alias)
