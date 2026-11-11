@@ -6,6 +6,8 @@ import SwiftUI
 /// protocol, so adding a device means writing one connector and listing it in `AccessoryRegistry`.
 ///
 /// Connectors must be event-driven: react to device callbacks and system notifications rather than timers.
+/// Every feature must be exclusive to the connector's own device: talk to that device directly, and never
+/// intercept system-wide input (global event taps), which would also change other devices' behavior.
 /// Lifecycle hooks below are the only points where the app asks a connector to do work.
 @MainActor
 protocol AccessoryConnector: AnyObject {
@@ -15,12 +17,16 @@ protocol AccessoryConnector: AnyObject {
     var displayName: String { get }
     /// SF Symbol shown next to the name in Settings.
     var systemImage: String { get }
-    /// Whether the accessory is currently attached. Must be observable so the popover card appears and
-    /// disappears on its own when the device connects or disconnects.
-    var isConnected: Bool { get }
+    /// Whether a device this connector supports is attached and has identified itself. A receiver with
+    /// nothing on it, or a device another connector owns, must report false so no card is shown.
+    /// Must be observable so the popover card appears and disappears on its own.
+    var isAvailable: Bool { get }
 
-    /// Called once at launch: register device callbacks, open hardware, install event taps.
+    /// Called once at launch: register device callbacks and open the hardware.
     func start()
+    /// Called when the app quits: hand any controls taken over from macOS back to the device, so it works
+    /// normally without the app.
+    func stop()
     /// Called after the Mac wakes. Devices often lose their settings across sleep, so re-apply them here.
     func systemDidWake()
     /// Called right before the menu bar popover opens: re-check permissions and fetch fresh state once.
@@ -41,14 +47,19 @@ protocol AccessoryConnector: AnyObject {
 enum AccessoryRegistry {
     static let connectors: [any AccessoryConnector] = [
         MXMasterManager.shared,
+        LogitechGConnector.shared,
     ]
 
-    static var connected: [any AccessoryConnector] {
-        connectors.filter(\.isConnected)
+    static var available: [any AccessoryConnector] {
+        connectors.filter(\.isAvailable)
     }
 
     static func startAll() {
         connectors.forEach { $0.start() }
+    }
+
+    static func stopAll() {
+        connectors.forEach { $0.stop() }
     }
 
     static func systemDidWake() {
@@ -70,7 +81,7 @@ enum AccessoryRegistry {
 /// appear and disappear as devices connect without any polling.
 struct AccessoryCardsView: View {
     var body: some View {
-        ForEach(AccessoryRegistry.connected, id: \.id) { connector in
+        ForEach(AccessoryRegistry.available, id: \.id) { connector in
             connector.makeCardView()
         }
     }

@@ -3,249 +3,88 @@ import CoreGraphics
 import Carbon.HIToolbox
 
 extension MXMasterManager {
-    // MARK: - Event Tap (Scrolling, Thumbwheel, Buttons & Hold-Drag Gestures)
+    // MARK: - Device-Exclusive Input (HID++ Diversion)
+    //
+    // Every MX input feature is diverted to this app over HID++: the mouse sends those controls to Aeron Tools
+    // instead of to macOS, and the app acts on them. Nothing is intercepted system-wide, so other mice are never
+    // affected, and a control left at its default isn't diverted at all.
 
-    private var needsEventTap: Bool {
-        config.standardVerticalScroll
-            || config.smoothScrolling
-            || config.invertThumbwheel
-            || config.thumbwheelAction != .horizontalScroll
-            || config.middleButtonAction != .systemDefault
-            || config.backButtonAction != .systemDefault
-            || config.forwardButtonAction != .systemDefault
-            || config.gestureButtonClickAction != .systemDefault
-            || config.gesturesEnabled
+    private var divertsWheel: Bool {
+        config.standardVerticalScroll || config.smoothScrolling || config.scrollSpeedMultiplier != 1.0
     }
 
-    func updateEventTapState() {
-        if needsEventTap {
-            startEventTapIfNeeded()
-        } else {
-            stopEventTap()
+    private var divertsThumbwheel: Bool {
+        config.invertThumbwheel || config.thumbwheelAction != .horizontalScroll
+    }
+
+    /// Pushes the current settings to the mouse. Called when its features are resolved, when it reconnects,
+    /// after wake, and whenever the settings change. Every packet is idempotent.
+    func applyInputDiversion() {
+        configureDivertedButtonsIfNeeded()
+        if let index = featureTable[HIDPPProtocol.featureHiResWheel] {
+            sendHIDPPPacket(HIDPPProtocol.setWheelModePacket(
+                deviceIndex: activeDeviceIndex, featureIndex: index, diverted: divertsWheel
+            ))
+        }
+        if let index = featureTable[HIDPPProtocol.featureThumbwheel] {
+            sendHIDPPPacket(HIDPPProtocol.setThumbwheelReportingPacket(
+                deviceIndex: activeDeviceIndex, featureIndex: index, diverted: divertsThumbwheel
+            ))
         }
     }
 
-    private func startEventTapIfNeeded() {
-        guard eventTap == nil else { return }
-        // Started again from the permission change handler once the user grants access.
-        guard AccessibilityPermission.shared.isGranted else { return }
-
-        let mask: CGEventMask =
-            (1 << CGEventType.scrollWheel.rawValue)
-            | (1 << CGEventType.otherMouseDown.rawValue)
-            | (1 << CGEventType.otherMouseUp.rawValue)
-
-        guard let tap = CGEvent.tapCreate(
-            tap: .cgSessionEventTap,
-            place: .headInsertEventTap,
-            options: .defaultTap,
-            eventsOfInterest: mask,
-            callback: mxMasterEventTapCallback,
-            userInfo: nil
-        ) else {
-            dlog("Failed to create MX Master event tap")
-            return
+    /// Hands every control back to macOS so the mouse works normally once the app has quit.
+    func releaseInputDiversion() {
+        configureDivertedButtonsIfNeeded(releasingAll: true)
+        if let index = featureTable[HIDPPProtocol.featureHiResWheel] {
+            sendHIDPPPacket(HIDPPProtocol.setWheelModePacket(deviceIndex: activeDeviceIndex, featureIndex: index, diverted: false))
         }
-
-        let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
-        CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
-        CGEvent.tapEnable(tap: tap, enable: true)
-        self.eventTap = tap
-        self.runLoopSource = source
-
-        let gestureMask: CGEventMask =
-            (1 << CGEventType.mouseMoved.rawValue)
-            | (1 << CGEventType.otherMouseDragged.rawValue)
-        if let gestureTap = CGEvent.tapCreate(
-            tap: .cgSessionEventTap,
-            place: .headInsertEventTap,
-            options: .defaultTap,
-            eventsOfInterest: gestureMask,
-            callback: mxMasterEventTapCallback,
-            userInfo: nil
-        ) {
-            CGEvent.tapEnable(tap: gestureTap, enable: false)
-            let gestureSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, gestureTap, 0)
-            CFRunLoopAddSource(CFRunLoopGetMain(), gestureSource, .commonModes)
-            self.gestureTap = gestureTap
-            self.gestureRunLoopSource = gestureSource
+        if let index = featureTable[HIDPPProtocol.featureThumbwheel] {
+            sendHIDPPPacket(HIDPPProtocol.setThumbwheelReportingPacket(deviceIndex: activeDeviceIndex, featureIndex: index, diverted: false))
         }
+        releaseGestureHoldIfNeeded()
     }
 
-    private func setGestureTapEnabled(_ enabled: Bool) {
-        if let gestureTap {
-            CGEvent.tapEnable(tap: gestureTap, enable: enabled)
-        }
-    }
-
-    /// Clears a stuck hold (e.g. the mouse disconnected mid-gesture) so the cursor is never left frozen.
+    /// Clears a stuck hold (e.g. the mouse disconnected mid-gesture).
     func releaseGestureHoldIfNeeded() {
         guard isGestureButtonHeld else { return }
         isGestureButtonHeld = false
         gestureTriggeredDuringHold = false
         gestureAccumulatedDelta = .zero
-        setGestureTapEnabled(false)
     }
 
-    func stopEventTap() {
-        if let tap = eventTap {
-            CGEvent.tapEnable(tap: tap, enable: false)
-        }
-        if let source = runLoopSource {
-            CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes)
-        }
-        if let gestureTap {
-            CGEvent.tapEnable(tap: gestureTap, enable: false)
-        }
-        if let gestureRunLoopSource {
-            CFRunLoopRemoveSource(CFRunLoopGetMain(), gestureRunLoopSource, .commonModes)
-        }
-        eventTap = nil
-        runLoopSource = nil
-        gestureTap = nil
-        gestureRunLoopSource = nil
-        isGestureButtonHeld = false
+    // MARK: - Diverted Wheel
+
+    /// macOS applies natural scrolling to real wheel events but not to events an app posts, so the direction
+    /// is chosen here: standard when requested, otherwise whatever the system is set to.
+    private var scrollDirectionSign: Double {
+        if config.standardVerticalScroll { return 1 }
+        let natural = UserDefaults.standard.object(forKey: "com.apple.swipescrolldirection") as? Bool ?? true
+        return natural ? -1 : 1
     }
 
-    fileprivate func reenableTapAfterTimeout() {
-        if let tap = eventTap {
-            CGEvent.tapEnable(tap: tap, enable: true)
-        }
-        // Only ever enable here. Disabling a tap delivers another tapDisabledByUserInput to this
-        // shared callback, so disabling the idle gesture tap from here loops forever on the main thread.
-        if isGestureButtonHeld && config.gesturesEnabled {
-            setGestureTapEnabled(true)
+    /// One wheel movement from the mouse, in notches; positive = rolled away from the user.
+    func handleDivertedWheel(notches: Int) {
+        guard notches != 0 else { return }
+        let ticks = Double(notches) * scrollDirectionSign * config.scrollSpeedMultiplier
+        if config.smoothScrolling {
+            enqueueSmoothScroll(verticalTicks: ticks)
+        } else {
+            postLineScroll(verticalTicks: ticks)
         }
     }
 
-    // MARK: - Event Handling Logic
-
-    private static let syntheticEventMarker: Int64 = 0x4D58_4D34 // 'MXM4'
-
-    fileprivate func handleCGEvent(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
-        let passThrough = Unmanaged.passUnretained(event)
-
-        // Never re-process synthetic events posted by our own smooth scroller or button synthesizer
-        if event.getIntegerValueField(.eventSourceUserData) == Self.syntheticEventMarker {
-            return passThrough
-        }
-
-        switch type {
-        case .scrollWheel:
-            return handleScrollWheelEvent(event)
-
-        case .otherMouseDown, .otherMouseUp:
-            let buttonNumber = event.getIntegerValueField(.mouseEventButtonNumber)
-            let isDown = (type == .otherMouseDown)
-            return handleOtherMouseButton(buttonNumber: Int(buttonNumber), isDown: isDown, event: event)
-
-        case .otherMouseDragged, .mouseMoved:
-            if isGestureButtonHeld && config.gesturesEnabled {
-                let dx = CGFloat(event.getDoubleValueField(.mouseEventDeltaX))
-                let dy = CGFloat(event.getDoubleValueField(.mouseEventDeltaY))
-                processGestureDragDelta(dx: dx, dy: dy)
-                return nil // Freeze cursor while performing a hold-and-drag gesture
-            }
-            return passThrough
-
-        default:
-            return passThrough
-        }
-    }
-
-    private func handleScrollWheelEvent(_ event: CGEvent) -> Unmanaged<CGEvent>? {
-        let passThrough = Unmanaged.passUnretained(event)
-
-        // Continuous scroll events come from the built-in Trackpad or Magic Mouse; only transform discrete wheel ticks!
-        let isContinuous = event.getIntegerValueField(.scrollWheelEventIsContinuous) != 0
-        guard !isContinuous else { return passThrough }
-
-        var axis1 = event.getIntegerValueField(.scrollWheelEventDeltaAxis1) // Vertical wheel
-        var axis2 = event.getIntegerValueField(.scrollWheelEventDeltaAxis2) // Horizontal thumbwheel
-
-        // 1. Handle Horizontal Thumbwheel
-        if axis2 != 0 {
-            if config.invertThumbwheel {
-                axis2 = -axis2
-            }
-
-            switch config.thumbwheelAction {
-            case .horizontalScroll:
-                event.setIntegerValueField(.scrollWheelEventDeltaAxis2, value: axis2)
-                let ptX = event.getDoubleValueField(.scrollWheelEventPointDeltaAxis2)
-                if ptX != 0 && config.invertThumbwheel {
-                    event.setDoubleValueField(.scrollWheelEventPointDeltaAxis2, value: -ptX)
-                }
-
-            case .displayBrightness:
-                let key: MediaKey = axis2 > 0 ? .brightnessUp : .brightnessDown
-                if let displayID = NSScreen.underPointer?.displayID {
-                    _ = DisplayStateModel.shared.handleMediaKey(key, on: displayID)
-                }
-                if axis1 == 0 { return nil }
-
-            case .displayVolume:
-                let key: MediaKey = axis2 > 0 ? .volumeUp : .volumeDown
-                if let displayID = NSScreen.underPointer?.displayID {
-                    _ = DisplayStateModel.shared.handleMediaKey(key, on: displayID)
-                }
-                if axis1 == 0 { return nil }
-
-            case .switchSpaces:
-                let now = CFAbsoluteTimeGetCurrent()
-                if now - lastSpaceOrTabSwitchTime > 0.28 {
-                    lastSpaceOrTabSwitchTime = now
-                    performButtonAction(axis2 > 0 ? .spaceRight : .spaceLeft)
-                }
-                if axis1 == 0 { return nil }
-
-            case .switchTabs:
-                let now = CFAbsoluteTimeGetCurrent()
-                if now - lastSpaceOrTabSwitchTime > 0.16 {
-                    lastSpaceOrTabSwitchTime = now
-                    // ⇧⌘] (next tab) or ⇧⌘[ (previous tab)
-                    let keyCode = UInt16(axis2 > 0 ? kVK_ANSI_RightBracket : kVK_ANSI_LeftBracket)
-                    postKeyCombo(keyCode: keyCode, flags: [.maskCommand, .maskShift])
-                }
-                if axis1 == 0 { return nil }
-
-            case .zoom:
-                let now = CFAbsoluteTimeGetCurrent()
-                if now - lastSpaceOrTabSwitchTime > 0.12 {
-                    lastSpaceOrTabSwitchTime = now
-                    let keyCode = UInt16(axis2 > 0 ? kVK_ANSI_Equal : kVK_ANSI_Minus)
-                    postKeyCombo(keyCode: keyCode, flags: [.maskCommand])
-                }
-                if axis1 == 0 { return nil }
-            }
-        }
-
-        // 2. Handle Vertical Scroll Wheel (Direction & Smooth Scrolling)
-        if axis1 != 0 {
-            if config.standardVerticalScroll {
-                axis1 = -axis1
-            }
-
-            if config.smoothScrolling {
-                enqueueSmoothScroll(verticalTicks: Double(axis1) * config.scrollSpeedMultiplier)
-                return nil
-            } else {
-                let scaled = Int64((Double(axis1) * config.scrollSpeedMultiplier).rounded())
-                let finalAxis1 = scaled == 0 ? (axis1 > 0 ? 1 : -1) : scaled
-                event.setIntegerValueField(.scrollWheelEventDeltaAxis1, value: finalAxis1)
-                let ptY = event.getDoubleValueField(.scrollWheelEventPointDeltaAxis1)
-                if ptY != 0 {
-                    let sign: Double = config.standardVerticalScroll ? -1.0 : 1.0
-                    event.setDoubleValueField(.scrollWheelEventPointDeltaAxis1, value: ptY * sign * config.scrollSpeedMultiplier)
-                }
-            }
-        }
-
-        return passThrough
+    /// Non-smooth scrolling: whole lines, carrying fractional ticks (from the speed multiplier) to the next notch.
+    private func postLineScroll(verticalTicks: Double) {
+        pendingLineScroll += verticalTicks
+        let lines = Int32(pendingLineScroll.rounded(.towardZero))
+        guard lines != 0 else { return }
+        pendingLineScroll -= Double(lines)
+        postScrollEvent(units: .line, vertical: lines, horizontal: 0)
     }
 
     private func enqueueSmoothScroll(verticalTicks: Double) {
-        // Each discrete mouse notch adds pixel velocity (~26 px per tick) decayed smoothly at 120 Hz
+        // Each notch adds pixel velocity, decayed smoothly at 120 Hz; the timer stops as soon as it settles.
         smoothScrollVelocityY += verticalTicks * 9.5
         guard smoothScrollTimer == nil else { return }
 
@@ -266,87 +105,89 @@ extension MXMasterManager {
 
         let stepPixels = Int32(smoothScrollVelocityY.rounded())
         smoothScrollVelocityY *= 0.84 // Smooth exponential momentum decay
-
-        guard stepPixels != 0,
-              let src = CGEventSource(stateID: .hidSystemState),
-              let scrollEvent = CGEvent(
-                  scrollWheelEvent2Source: src,
-                  units: .pixel,
-                  wheelCount: 1,
-                  wheel1: stepPixels,
-                  wheel2: 0,
-                  wheel3: 0
-              ) else { return }
-
-        scrollEvent.setIntegerValueField(.eventSourceUserData, value: Self.syntheticEventMarker)
-        scrollEvent.post(tap: .cgSessionEventTap)
-    }
-
-    private func handleOtherMouseButton(buttonNumber: Int, isDown: Bool, event: CGEvent) -> Unmanaged<CGEvent>? {
-        let passThrough = Unmanaged.passUnretained(event)
-
-        switch buttonNumber {
-        case 2: // Middle Button (Wheel click)
-            guard config.middleButtonAction != .systemDefault else { return passThrough }
-            if isDown {
-                performButtonAction(config.middleButtonAction)
-            }
-            return nil
-
-        case 3: // Back Button
-            guard config.backButtonAction != .systemDefault else { return passThrough }
-            if isDown {
-                performButtonAction(config.backButtonAction)
-            }
-            return nil
-
-        case 4: // Forward Button
-            guard config.forwardButtonAction != .systemDefault else { return passThrough }
-            if isDown {
-                performButtonAction(config.forwardButtonAction)
-            }
-            return nil
-
-        case 5, 6: // Thumb / Gesture Button (when exposed as standard HID button 5/6)
-            if config.gesturesEnabled {
-                handleDivertedGestureButtonState(isDown: isDown)
-                return nil
-            }
-            guard config.gestureButtonClickAction != .systemDefault else { return passThrough }
-            if isDown {
-                performButtonAction(config.gestureButtonClickAction)
-            }
-            return nil
-
-        default:
-            return passThrough
+        if stepPixels != 0 {
+            postScrollEvent(units: .pixel, vertical: stepPixels, horizontal: 0)
         }
     }
+
+    private func postScrollEvent(units: CGScrollEventUnit, vertical: Int32, horizontal: Int32) {
+        guard let source = CGEventSource(stateID: .hidSystemState),
+              let event = CGEvent(
+                  scrollWheelEvent2Source: source,
+                  units: units,
+                  wheelCount: 2,
+                  wheel1: vertical,
+                  wheel2: horizontal,
+                  wheel3: 0
+              ) else { return }
+        event.post(tap: .cgSessionEventTap)
+    }
+
+    // MARK: - Diverted Thumbwheel
+
+    /// Pixels of horizontal scroll per unit of diverted thumbwheel rotation.
+    private static let thumbwheelPixelsPerUnit: Int = 2
+
+    func handleDivertedThumbwheel(rotation: Int) {
+        guard rotation != 0 else { return }
+        let delta = config.invertThumbwheel ? -rotation : rotation
+        let now = CFAbsoluteTimeGetCurrent()
+
+        switch config.thumbwheelAction {
+        case .horizontalScroll:
+            postScrollEvent(units: .pixel, vertical: 0, horizontal: Int32(delta * Self.thumbwheelPixelsPerUnit))
+
+        case .displayBrightness:
+            if let displayID = NSScreen.underPointer?.displayID {
+                _ = DisplayStateModel.shared.handleMediaKey(delta > 0 ? .brightnessUp : .brightnessDown, on: displayID)
+            }
+
+        case .displayVolume:
+            if let displayID = NSScreen.underPointer?.displayID {
+                _ = DisplayStateModel.shared.handleMediaKey(delta > 0 ? .volumeUp : .volumeDown, on: displayID)
+            }
+
+        case .switchSpaces:
+            guard now - lastSpaceOrTabSwitchTime > 0.28 else { return }
+            lastSpaceOrTabSwitchTime = now
+            performButtonAction(delta > 0 ? .spaceRight : .spaceLeft)
+
+        case .switchTabs:
+            guard now - lastSpaceOrTabSwitchTime > 0.16 else { return }
+            lastSpaceOrTabSwitchTime = now
+            // ⇧⌘] (next tab) or ⇧⌘[ (previous tab)
+            postKeyCombo(keyCode: UInt16(delta > 0 ? kVK_ANSI_RightBracket : kVK_ANSI_LeftBracket), flags: [.maskCommand, .maskShift])
+
+        case .zoom:
+            guard now - lastSpaceOrTabSwitchTime > 0.12 else { return }
+            lastSpaceOrTabSwitchTime = now
+            postKeyCombo(keyCode: UInt16(delta > 0 ? kVK_ANSI_Equal : kVK_ANSI_Minus), flags: [.maskCommand])
+        }
+    }
+
+    // MARK: - Diverted Buttons & Hold-Drag Gestures
 
     func handleDivertedGestureButtonState(isDown: Bool) {
         if isDown {
             isGestureButtonHeld = true
             gestureTriggeredDuringHold = false
             gestureAccumulatedDelta = .zero
-            setGestureTapEnabled(config.gesturesEnabled)
         } else {
             let wasHeld = isGestureButtonHeld
             let didDrag = gestureTriggeredDuringHold
-            isGestureButtonHeld = false
-            gestureTriggeredDuringHold = false
-            gestureAccumulatedDelta = .zero
-            setGestureTapEnabled(false)
-
+            releaseGestureHoldIfNeeded()
             if wasHeld && !didDrag {
                 performButtonAction(config.gestureButtonClickAction)
             }
         }
     }
 
-    private func processGestureDragDelta(dx: CGFloat, dy: CGFloat) {
-        guard !gestureTriggeredDuringHold else { return }
-        gestureAccumulatedDelta.x += dx
-        gestureAccumulatedDelta.y += dy
+    /// Pointer motion while the gesture button is held. The mouse diverts it (raw XY) instead of moving the
+    /// cursor, so only this mouse's motion ever reaches here. Positive dy = moved toward the user.
+    func handleDivertedRawXY(dx: Int, dy: Int) {
+        guard isGestureButtonHeld, config.gesturesEnabled, !gestureTriggeredDuringHold else { return }
+        gestureAccumulatedDelta.x += CGFloat(dx)
+        gestureAccumulatedDelta.y += CGFloat(dy)
 
         let absX = abs(gestureAccumulatedDelta.x)
         let absY = abs(gestureAccumulatedDelta.y)
@@ -354,18 +195,9 @@ extension MXMasterManager {
 
         gestureTriggeredDuringHold = true
         if absY >= absX {
-            // Screen coordinates: negative dy is moving mouse UP, positive dy is moving mouse DOWN
-            if gestureAccumulatedDelta.y < 0 {
-                performButtonAction(config.gestureUpAction)
-            } else {
-                performButtonAction(config.gestureDownAction)
-            }
+            performButtonAction(gestureAccumulatedDelta.y < 0 ? config.gestureUpAction : config.gestureDownAction)
         } else {
-            if gestureAccumulatedDelta.x < 0 {
-                performButtonAction(config.gestureLeftAction)
-            } else {
-                performButtonAction(config.gestureRightAction)
-            }
+            performButtonAction(gestureAccumulatedDelta.x < 0 ? config.gestureLeftAction : config.gestureRightAction)
         }
     }
 
@@ -466,8 +298,6 @@ extension MXMasterManager {
         }
         down.flags = effectiveFlags
         up.flags = effectiveFlags
-        down.setIntegerValueField(.eventSourceUserData, value: Self.syntheticEventMarker)
-        up.setIntegerValueField(.eventSourceUserData, value: Self.syntheticEventMarker)
         down.post(tap: .cghidEventTap)
         up.post(tap: .cghidEventTap)
     }
@@ -490,25 +320,5 @@ extension MXMasterManager {
                 nsEvent.cgEvent?.post(tap: .cghidEventTap)
             }
         }
-    }
-}
-
-// MARK: - Event Tap C Callback
-
-private nonisolated func mxMasterEventTapCallback(
-    proxy: CGEventTapProxy,
-    type: CGEventType,
-    event: CGEvent,
-    userInfo: UnsafeMutableRawPointer?
-) -> Unmanaged<CGEvent>? {
-    if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
-        MainActor.assumeIsolated {
-            MXMasterManager.shared.reenableTapAfterTimeout()
-        }
-        return Unmanaged.passUnretained(event)
-    }
-
-    return MainActor.assumeIsolated {
-        MXMasterManager.shared.handleCGEvent(type: type, event: event)
     }
 }

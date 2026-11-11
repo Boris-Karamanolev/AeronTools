@@ -256,3 +256,24 @@ public struct MXMasterSnapshot: Sendable, Equatable {
     public let reportedSmartShiftEnabled: Bool?
     public let reportedSmartShiftThreshold: Int?
 }
+
+extension MXMasterSnapshot {
+    /// The same snapshot with the device's own name, as reported over HID++.
+    func withDeviceName(_ name: String) -> MXMasterSnapshot {
+        MXMasterSnapshot(
+            deviceName: name,
+            productID: productID,
+            transport: transport,
+            batteryPercent: batteryPercent,
+            isCharging: isCharging,
+            hidppConnected: hidppConnected,
+            minDPI: minDPI,
+            maxDPI: maxDPI,
+            dpiStep: dpiStep,
+            reportedDPI: reportedDPI,
+            reportedWheelMode: reportedWheelMode,
+            reportedSmartShiftEnabled: reportedSmartShiftEnabled,
+            reportedSmartShiftThreshold: reportedSmartShiftThreshold
+        )
+    }
+}

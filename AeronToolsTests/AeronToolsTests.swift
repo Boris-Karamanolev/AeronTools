@@ -265,3 +265,126 @@ struct WirelessDisplayTests {
         #expect(touchParsed?.queryItems["y"] == "0.8125")
     }
 }
+
+// MARK: - HID++ Diversion
+
+@Suite("HID++ input diversion packets and events")
+struct HIDPPDiversionTests {
+    @Test("Control reporting sets divert and raw XY bits only when diverting, and always marks both valid")
+    func controlReportingFlags() {
+        let divertedWithRawXY = HIDPPProtocol.setControlReportingPacket(
+            deviceIndex: 0x01, featureIndex: 0x09, controlID: 0x00C3, diverted: true, rawXY: true
+        )
+        #expect(Array(divertedWithRawXY[0...6]) == [0x11, 0x01, 0x09, 0x3A, 0x00, 0xC3, 0x33])
+
+        let divertedOnly = HIDPPProtocol.setControlReportingPacket(
+            deviceIndex: 0x01, featureIndex: 0x09, controlID: 0x0053, diverted: true
+        )
+        #expect(divertedOnly[6] == 0x23)
+
+        // Releasing must also clear raw XY, even if it was requested.
+        let released = HIDPPProtocol.setControlReportingPacket(
+            deviceIndex: 0x01, featureIndex: 0x09, controlID: 0x00C3, diverted: false, rawXY: true
+        )
+        #expect(released[6] == 0x22)
+    }
+
+    @Test("Wheel and thumbwheel reporting packets switch between HID++ and native")
+    func wheelReportingPackets() {
+        let wheel = HIDPPProtocol.setWheelModePacket(deviceIndex: 0x01, featureIndex: 0x0B, diverted: true)
+        #expect(Array(wheel[0...4]) == [0x11, 0x01, 0x0B, 0x2A, 0x01])
+        #expect(HIDPPProtocol.setWheelModePacket(deviceIndex: 0x01, featureIndex: 0x0B, diverted: false)[4] == 0x00)
+
+        let thumb = HIDPPProtocol.setThumbwheelReportingPacket(deviceIndex: 0x01, featureIndex: 0x0C, diverted: true)
+        #expect(Array(thumb[0...5]) == [0x11, 0x01, 0x0C, 0x2A, 0x01, 0x00])
+    }
+
+    @Test("Wheel movement events decode a signed notch delta")
+    func wheelMovementEvent() {
+        var event = [UInt8](repeating: 0, count: 20)
+        event[0] = 0x11; event[1] = 0x01; event[2] = 0x0B; event[3] = 0x00
+        event[5] = 0xFF; event[6] = 0xFE // -2
+        #expect(HIDPPProtocol.parseWheelMovementEvent(event, expectedFeatureIndex: 0x0B) == -2)
+
+        event[5] = 0x00; event[6] = 0x03
+        #expect(HIDPPProtocol.parseWheelMovementEvent(event, expectedFeatureIndex: 0x0B) == 3)
+    }
+
+    @Test("Replies to this app's own requests are never mistaken for input events")
+    func repliesAreNotEvents() {
+        var reply = [UInt8](repeating: 0, count: 20)
+        reply[0] = 0x11; reply[1] = 0x01; reply[2] = 0x0B
+        reply[3] = 0x2A // setWheelMode reply: function 2, software ID 0x0A
+        reply[5] = 0x00; reply[6] = 0x01
+        #expect(HIDPPProtocol.parseWheelMovementEvent(reply, expectedFeatureIndex: 0x0B) == nil)
+        #expect(HIDPPProtocol.parseWheelMovementEvent(reply, expectedFeatureIndex: 0x0C) == nil)
+    }
+
+    @Test("Thumbwheel and raw XY events decode signed 16-bit values")
+    func thumbwheelAndRawXYEvents() {
+        var thumb = [UInt8](repeating: 0, count: 20)
+        thumb[0] = 0x11; thumb[1] = 0x01; thumb[2] = 0x0C; thumb[3] = 0x00
+        thumb[4] = 0xFF; thumb[5] = 0xF6 // -10
+        #expect(HIDPPProtocol.parseThumbwheelEvent(thumb, expectedFeatureIndex: 0x0C) == -10)
+
+        var rawXY = [UInt8](repeating: 0, count: 20)
+        rawXY[0] = 0x11; rawXY[1] = 0x01; rawXY[2] = 0x09
+        rawXY[3] = 0x10 // event 1
+        rawXY[4] = 0x00; rawXY[5] = 0x05 // dx = 5
+        rawXY[6] = 0xFF; rawXY[7] = 0xFD // dy = -3
+        let motion = HIDPPProtocol.parseRawXYEvent(rawXY, expectedFeatureIndex: 0x09)
+        #expect(motion?.dx == 5)
+        #expect(motion?.dy == -3)
+
+        // A diverted-buttons event (event 0) on the same feature isn't raw XY.
+        rawXY[3] = 0x00
+        #expect(HIDPPProtocol.parseRawXYEvent(rawXY, expectedFeatureIndex: 0x09) == nil)
+    }
+}
+
+// MARK: - Logitech G Features
+
+@Suite("Logitech G DPI, report rate and onboard profile parsing")
+struct LogitechGProtocolTests {
+    private func packet(_ hex: String) -> [UInt8] {
+        hex.split(separator: " ").compactMap { UInt8($0, radix: 16) }
+    }
+
+    @Test("DPI ranges join a word split across pages and keep each segment's step")
+    func dpiRangesAcrossPages() throws {
+        // Captured from a PRO X2 SUPERSTRIKE: 0x03E8 (1000) is split between page 0 and page 1.
+        let page0 = packet("11 01 09 2C 00 00 00 00 64 E0 01 00 C8 E0 02 01 F4 E0 05 03")
+        let page1 = packet("11 01 09 2C 00 00 01 E8 E0 0A 07 D0 E0 14 13 88 E0 32 27 10")
+        // Page 2 is constructed (not captured): 10000–44000 in steps of 100, then the 0x0000 terminator.
+        let page2 = packet("11 01 09 2C 00 00 02 E0 64 AB E0 00 00 00 00 00 00 00 00 00")
+        #expect(!HIDPPProtocol.dpiRangePageEndsList(page0))
+        #expect(HIDPPProtocol.dpiRangePageEndsList(page2))
+
+        let range = try #require(HIDPPProtocol.parseDPIRanges(pages: [page0, page1, page2]))
+        #expect(range.minimum == 100)
+        #expect(range.maximum == 44000)
+        #expect(range.segments[0] == .init(lower: 100, upper: 200, step: 1))
+        #expect(range.segments[3] == .init(lower: 1000, upper: 2000, step: 10))
+        #expect(range.nearestSupported(1234) == 1230)
+        #expect(range.nearestSupported(50) == 100)
+        #expect(range.nearestSupported(99_999) == 44000)
+    }
+
+    @Test("Sensor DPI parameters decode current DPI and lift-off distance, and round-trip into a set request")
+    func sensorDPI() {
+        let reply = packet("11 01 09 5C 00 03 20 03 20 03 20 03 20 02 00 00 00 00 00 00")
+        #expect(HIDPPProtocol.parseSensorDPI(reply) == .init(dpi: 800, liftOffDistance: 2))
+        #expect(HIDPPProtocol.setSensorDPIParams(dpi: 800, liftOffDistance: 2) == [0x00, 0x03, 0x20, 0x03, 0x20, 0x02])
+    }
+
+    @Test("Report rate flags map to Hz, and the current rate index decodes")
+    func reportRates() {
+        let list = packet("11 01 0D 1C 00 7F 00 00 00 00 00 00 00 00 00 00 00 00 00 00")
+        #expect(HIDPPProtocol.parseSupportedReportRates(list) == [125, 250, 500, 1000, 2000, 4000, 8000])
+
+        let current = packet("11 01 0D 2C 03 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00")
+        #expect(HIDPPProtocol.parseReportRate(current) == 1000)
+        #expect(HIDPPProtocol.reportRateIndex(forHz: 8000) == 6)
+        #expect(HIDPPProtocol.reportRateIndex(forHz: 333) == nil)
+    }
+}

@@ -35,6 +35,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         guard !Self.isRunningTests else { return }
+        AccessoryRegistry.stopAll()
         DisplayStateModel.shared.prepareForTermination()
     }
 

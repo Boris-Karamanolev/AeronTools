@@ -2,11 +2,17 @@ import SwiftUI
 
 // MARK: - MX Master as an AccessoryConnector
 
-/// `start()` and `isConnected` are provided by `MXMasterManager` itself.
+/// `start()` is provided by `MXMasterManager` itself.
 extension MXMasterManager: AccessoryConnector {
     var id: String { "logitech.mx-master" }
     var displayName: String { "MX Master" }
     var systemImage: String { "magicmouse" }
+
+    var isAvailable: Bool { isConnected && isIdentified }
+
+    func stop() {
+        releaseInputDiversion()
+    }
 
     func systemDidWake() {
         refreshDeviceState()

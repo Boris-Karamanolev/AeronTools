@@ -9,10 +9,16 @@ extension MXMasterManager {
     func setupHIDManager() {
         guard hidManager == nil else { return }
         let manager = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
-        let matchDict: [String: Any] = [
-            kIOHIDVendorIDKey as String: HIDPPProtocol.logitechVendorID
-        ]
-        IOHIDManagerSetDeviceMatching(manager, matchDict as CFDictionary)
+        // Only the vendor-defined HID++ collections: 0xFF00 on Bolt/Unifying receivers, 0xFF43 on Bluetooth
+        // mice. Matching the whole vendor would also open the receiver's pointer and keyboard interfaces,
+        // so every mouse movement would be delivered to (and processed by) this app.
+        let matchDicts: [[String: Any]] = [0xFF00, 0xFF43].map { usagePage in
+            [
+                kIOHIDVendorIDKey as String: HIDPPProtocol.logitechVendorID,
+                kIOHIDDeviceUsagePageKey as String: usagePage
+            ]
+        }
+        IOHIDManagerSetDeviceMatchingMultiple(manager, matchDicts as CFArray)
 
         let context = Unmanaged.passUnretained(self).toOpaque()
         IOHIDManagerRegisterDeviceMatchingCallback(manager, { context, _, _, _ in
@@ -96,6 +102,35 @@ extension MXMasterManager {
         refreshDeviceState()
     }
 
+    /// Asks the device paired to the receiver who it is. Only a device that names itself an MX Master makes
+    /// the card appear; an empty or sleeping slot, or another Logitech device, leaves it hidden.
+    func identifyReceiverDevice() {
+        guard let session = identitySession else { return }
+        identifyTask?.cancel()
+        identifyTask = Task { [weak self] in
+            let identity = await session.identify()
+            guard let self, !Task.isCancelled, self.identitySession === session else { return }
+            if let identity, identity.name.lowercased().contains("mx master") {
+                self.isIdentified = true
+                if self.snapshot.deviceName != identity.name {
+                    self.snapshot = self.snapshot.withDeviceName(identity.name)
+                }
+            } else {
+                self.isIdentified = false
+            }
+        }
+    }
+
+    /// HID++ 1.0 device-connection notification (0x41) from the receiver: byte 4 bit 6 set means the link is down.
+    /// Diversions don't survive the mouse powering off, so when it comes back they're resolved and applied again.
+    private func handleReceiverEvent(_ event: [UInt8]) {
+        guard event[2] == 0x41, event[4] & 0x40 == 0 else { return }
+        featureTable.removeAll()
+        releaseGestureHoldIfNeeded()
+        probeHIDPPFeatures()
+        identifyReceiverDevice()
+    }
+
     /// Opens System Settings → Privacy & Security → Input Monitoring.
     public func openInputMonitoringSettings() {
         if !hasInputMonitoringAccess {
@@ -121,6 +156,14 @@ extension MXMasterManager {
                 featureTable.removeAll()
                 pressedDivertedCIDs.removeAll()
                 releaseGestureHoldIfNeeded()
+                let session = HIDPPSession(device: candidate.device, deviceIndex: candidate.deviceIndex)
+                session.onEvent = { [weak self] event in self?.handleReceiverEvent(event) }
+                identitySession = session
+                isIdentified = false
+                if hasInputMonitoringAccess && (candidate.transport == .logiBolt || candidate.transport == .unifying) {
+                    // Lets the receiver report the mouse waking up, so diversions are re-applied without polling.
+                    Task { await session.enableReceiverConnectionNotifications() }
+                }
                 // Skip opening without access: the open would trigger a blocking TCC prompt on the main thread.
                 if hasInputMonitoringAccess {
                     let openResult = IOHIDDeviceOpen(candidate.device, IOOptionBits(kIOHIDOptionsTypeNone))
@@ -135,7 +178,14 @@ extension MXMasterManager {
                 requestSmartShiftFromHIDPP()
             }
 
-            let resolvedName = candidate.name.isEmpty ? "MX Master 4" : candidate.name
+            let isReceiver = candidate.transport == .logiBolt || candidate.transport == .unifying
+            if !isReceiver {
+                isIdentified = true
+            } else if hasInputMonitoringAccess {
+                identifyReceiverDevice()
+            }
+
+            let resolvedName = isReceiver ? (isIdentified ? snapshot.deviceName : "MX Master") : candidate.name
             let mergedBattery = snapshot.batteryPercent ?? registryBattery?.percentage
             let mergedCharging = registryBattery?.isCharging ?? snapshot.isCharging
 
@@ -164,6 +214,7 @@ extension MXMasterManager {
         } else if let registryBattery {
             // Connected via Bluetooth LE where macOS HID event driver owns the device
             isConnected = true
+            isIdentified = true
             activeHIDDevice = nil
             snapshot = MXMasterSnapshot(
                 deviceName: registryBattery.deviceName,
@@ -183,7 +234,10 @@ extension MXMasterManager {
             lastStatusMessage = "Connected via Bluetooth LE"
         } else {
             isConnected = false
+            isIdentified = false
             activeHIDDevice = nil
+            identitySession = nil
+            identifyTask?.cancel()
             featureTable.removeAll()
             snapshot = MXMasterSnapshot(
                 deviceName: "MX Master 4",
@@ -230,11 +284,12 @@ extension MXMasterManager {
             let usagePage = Self.intProperty(kIOHIDPrimaryUsagePageKey, of: device) ?? 0
             let usage = Self.intProperty(kIOHIDPrimaryUsageKey, of: device) ?? 0
 
-            // Exclude pure keyboards that aren't receivers or MX Master mice
+            // MX Masters pair with Bolt or Unifying receivers, or connect directly under their own name.
+            // Anything else (LIGHTSPEED gaming receivers, keyboards) belongs to another connector or none.
             let lowerName = rawName.lowercased()
-            if lowerName.contains("keyboard") || lowerName.contains("mx keys") {
-                continue
-            }
+            let isMXReceiver = productID == HIDPPProtocol.boltReceiverProductID
+                || productID == HIDPPProtocol.unifyingReceiverProductID
+            guard isMXReceiver || lowerName.contains("mx master") else { continue }
 
             let transport: MXConnectionTransport
             let deviceIndex: UInt8
@@ -324,10 +379,8 @@ extension MXMasterManager {
                 }
                 let name = (desc[kIOPSNameKey as String] as? String) ?? ""
                 let lower = name.lowercased()
-                let transport = ((desc[kIOPSTransportTypeKey as String] as? String) ?? "").lowercased()
-                guard lower.contains("mx master") || lower.contains("logi") || (transport.contains("bluetooth") && lower.contains("mouse")) else {
-                    continue
-                }
+                // Only MX Masters: other Logitech mice have their own connectors (or none).
+                guard lower.contains("mx master") else { continue }
                 if let capacity = desc[kIOPSCurrentCapacityKey as String] as? Int, (1...100).contains(capacity) {
                     let isCharging = (desc[kIOPSIsChargingKey as String] as? Bool) ?? false
                     let displayName = lower.contains("mx master") ? name : "MX Master 4"
@@ -353,10 +406,7 @@ extension MXMasterManager {
             let vendor = dict["VendorID"] as? Int ?? 0
             let product = dict["Product"] as? String ?? ""
             let lower = product.lowercased()
-            guard vendor == HIDPPProtocol.logitechVendorID || lower.contains("mx master") else {
-                continue
-            }
-            if lower.contains("keyboard") || lower.contains("mx keys") {
+            guard vendor == HIDPPProtocol.logitechVendorID, lower.contains("mx master") else {
                 continue
             }
             if let percent = dict["BatteryPercent"] as? Int, (1...100).contains(percent) {
@@ -371,7 +421,20 @@ extension MXMasterManager {
 
     // MARK: - HID++ 2.0 Transport & Feature Negotiation
 
-    private func sendHIDPPPacket(_ packet: [UInt8]) {
+    /// Features looked up after connecting. The array position (+1) is the software ID of the lookup, so slots
+    /// must stay below 0x0A, which this app uses for ordinary requests.
+    private static let probedFeatures: [UInt16] = [
+        HIDPPProtocol.featureUnifiedBattery,
+        HIDPPProtocol.featureBatteryStatus,
+        HIDPPProtocol.featureAdjustableDPI,
+        HIDPPProtocol.featureSmartShiftEnhanced,
+        HIDPPProtocol.featureSmartShift,
+        HIDPPProtocol.featureReprogControlsV4,
+        HIDPPProtocol.featureHiResWheel,
+        HIDPPProtocol.featureThumbwheel
+    ]
+
+    func sendHIDPPPacket(_ packet: [UInt8]) {
         guard let device = activeHIDDevice, !packet.isEmpty else { return }
         let reportID = CFIndex(packet[0])
         packet.withUnsafeBufferPointer { buf in
@@ -385,16 +448,8 @@ extension MXMasterManager {
 
     /// Resolves feature indices for UnifiedBattery, AdjustableDPI, SmartShift, and ReprogControlsV4.
     private func probeHIDPPFeatures() {
-        let featuresToProbe: [UInt16] = [
-            HIDPPProtocol.featureUnifiedBattery,
-            HIDPPProtocol.featureBatteryStatus,
-            HIDPPProtocol.featureAdjustableDPI,
-            HIDPPProtocol.featureSmartShiftEnhanced,
-            HIDPPProtocol.featureSmartShift,
-            HIDPPProtocol.featureReprogControlsV4
-        ]
-        for (idx, featureID) in featuresToProbe.enumerated() {
-            // Encode the feature lookup slot in the softwareID nibble (1...6) so replies map back unambiguously.
+        for (idx, featureID) in Self.probedFeatures.enumerated() {
+            // Encode the feature lookup slot in the softwareID nibble (1...8) so replies map back unambiguously.
             let swID = UInt8(idx + 1)
             let packet = HIDPPProtocol.makeLongPacket(
                 deviceIndex: activeDeviceIndex,
@@ -412,6 +467,10 @@ extension MXMasterManager {
         if !raw.isEmpty && raw[0] != reportID && (reportID == HIDPPProtocol.shortReportID || reportID == HIDPPProtocol.longReportID) {
             raw.insert(reportID, at: 0)
         }
+        // Replies to the identification requests belong to the session, not to the feature code below.
+        if identitySession?.handle(report: raw) == true {
+            return
+        }
         guard let norm = HIDPPProtocol.normalizeReport(raw), !HIDPPProtocol.isErrorResponse(norm) else {
             return
         }
@@ -421,17 +480,9 @@ extension MXMasterManager {
 
         // 1. Check if this is an IRoot (0x0000) feature lookup response
         if featureIndex == 0x00, let resolvedIndex = HIDPPProtocol.parseFeatureIndexReply(norm) {
-            let probedFeatures: [UInt16] = [
-                HIDPPProtocol.featureUnifiedBattery,
-                HIDPPProtocol.featureBatteryStatus,
-                HIDPPProtocol.featureAdjustableDPI,
-                HIDPPProtocol.featureSmartShiftEnhanced,
-                HIDPPProtocol.featureSmartShift,
-                HIDPPProtocol.featureReprogControlsV4
-            ]
             let slot = Int(swID) - 1
-            if probedFeatures.indices.contains(slot) {
-                let featureID = probedFeatures[slot]
+            if Self.probedFeatures.indices.contains(slot) {
+                let featureID = Self.probedFeatures[slot]
                 featureTable[featureID] = resolvedIndex
                 onFeatureResolved(featureID: featureID, index: resolvedIndex)
             }
@@ -497,7 +548,26 @@ extension MXMasterManager {
             return
         }
 
-        // 5. Diverted Gesture/Thumb Button Events (0x1B04)
+        // 5. Diverted wheel, thumbwheel and gesture motion: only this mouse's input ever arrives here.
+        if let wheelIdx = featureTable[HIDPPProtocol.featureHiResWheel], featureIndex == wheelIdx {
+            if let notches = HIDPPProtocol.parseWheelMovementEvent(norm, expectedFeatureIndex: wheelIdx) {
+                handleDivertedWheel(notches: notches)
+            }
+            return
+        }
+        if let thumbIdx = featureTable[HIDPPProtocol.featureThumbwheel], featureIndex == thumbIdx {
+            if let rotation = HIDPPProtocol.parseThumbwheelEvent(norm, expectedFeatureIndex: thumbIdx) {
+                handleDivertedThumbwheel(rotation: rotation)
+            }
+            return
+        }
+        if let reprogIdx = featureTable[HIDPPProtocol.featureReprogControlsV4], featureIndex == reprogIdx,
+           let motion = HIDPPProtocol.parseRawXYEvent(norm, expectedFeatureIndex: reprogIdx) {
+            handleDivertedRawXY(dx: motion.dx, dy: motion.dy)
+            return
+        }
+
+        // 6. Diverted Button Events (0x1B04)
         if let reprogIdx = featureTable[HIDPPProtocol.featureReprogControlsV4], featureIndex == reprogIdx,
            let pressedCIDs = HIDPPProtocol.parseDivertedButtonsEvent(norm, expectedFeatureIndex: reprogIdx) {
             let pressed = Set(pressedCIDs)
@@ -524,8 +594,8 @@ extension MXMasterManager {
                 smartShiftEnabled: config.smartShiftEnabled,
                 threshold: config.smartShiftThreshold
             )
-        case HIDPPProtocol.featureReprogControlsV4:
-            configureDivertedButtonsIfNeeded()
+        case HIDPPProtocol.featureReprogControlsV4, HIDPPProtocol.featureHiResWheel, HIDPPProtocol.featureThumbwheel:
+            applyInputDiversion()
         default:
             break
         }
@@ -630,19 +700,27 @@ extension MXMasterManager {
         )
     }
 
-    func configureDivertedButtonsIfNeeded() {
+    /// Diverts each control whose action isn't the system default, so only this mouse's presses trigger it.
+    /// The gesture button also diverts pointer motion while held (raw XY), which keeps the cursor still and
+    /// delivers the drag to `handleDivertedRawXY` instead.
+    func configureDivertedButtonsIfNeeded(releasingAll: Bool = false) {
         guard let idx = featureTable[HIDPPProtocol.featureReprogControlsV4] else { return }
-        let diversions: [(UInt16, Bool)] = [
-            (HIDPPProtocol.cidGestureThumbButton, config.gesturesEnabled || config.gestureButtonClickAction != .systemDefault),
-            (HIDPPProtocol.cidModeShiftButton, config.modeShiftButtonAction != .systemDefault),
-            (HIDPPProtocol.cidHapticPanelButton, config.hapticPanelButtonAction != .systemDefault)
+        let diversions: [(cid: UInt16, diverted: Bool, rawXY: Bool)] = [
+            (HIDPPProtocol.cidGestureThumbButton,
+             config.gesturesEnabled || config.gestureButtonClickAction != .systemDefault, config.gesturesEnabled),
+            (HIDPPProtocol.cidMiddleButton, config.middleButtonAction != .systemDefault, false),
+            (HIDPPProtocol.cidBackButton, config.backButtonAction != .systemDefault, false),
+            (HIDPPProtocol.cidForwardButton, config.forwardButtonAction != .systemDefault, false),
+            (HIDPPProtocol.cidModeShiftButton, config.modeShiftButtonAction != .systemDefault, false),
+            (HIDPPProtocol.cidHapticPanelButton, config.hapticPanelButtonAction != .systemDefault, false)
         ]
-        for (cid, diverted) in diversions {
-            sendHIDPPPacket(HIDPPProtocol.setControlDivertedPacket(
+        for control in diversions {
+            sendHIDPPPacket(HIDPPProtocol.setControlReportingPacket(
                 deviceIndex: activeDeviceIndex,
                 featureIndex: idx,
-                controlID: cid,
-                diverted: diverted
+                controlID: control.cid,
+                diverted: control.diverted && !releasingAll,
+                rawXY: control.rawXY
             ))
         }
     }
@@ -652,6 +730,12 @@ extension MXMasterManager {
         switch cid {
         case HIDPPProtocol.cidGestureThumbButton:
             handleDivertedGestureButtonState(isDown: isDown)
+        case HIDPPProtocol.cidMiddleButton:
+            if isDown { performButtonAction(config.middleButtonAction) }
+        case HIDPPProtocol.cidBackButton:
+            if isDown { performButtonAction(config.backButtonAction) }
+        case HIDPPProtocol.cidForwardButton:
+            if isDown { performButtonAction(config.forwardButtonAction) }
         case HIDPPProtocol.cidModeShiftButton:
             if isDown { performButtonAction(config.modeShiftButtonAction) }
         case HIDPPProtocol.cidHapticPanelButton:

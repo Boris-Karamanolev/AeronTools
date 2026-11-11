@@ -1,0 +1,125 @@
+import Foundation
+
+// MARK: - Logitech G HID++ Features
+
+/// Pure builders and parsers for the gaming-mouse features used by `LogitechGConnector`. Layouts were
+/// confirmed against a PRO X2 SUPERSTRIKE.
+nonisolated extension HIDPPProtocol {
+    static let featureExtendedDPI: UInt16 = 0x2202
+    static let featureExtendedReportRate: UInt16 = 0x8061
+    static let featureOnboardProfiles: UInt16 = 0x8100
+
+    // MARK: Extended Adjustable DPI (0x2202)
+
+    /// The DPI values a sensor accepts, as contiguous ranges with a fixed step each
+    /// (e.g. 100–200 in steps of 1, then 200–500 in steps of 2, …).
+    struct DPIRange: Equatable, Sendable {
+        struct Segment: Equatable, Sendable {
+            let lower: Int
+            let upper: Int
+            let step: Int
+        }
+
+        let segments: [Segment]
+
+        var minimum: Int { segments.first?.lower ?? 0 }
+        var maximum: Int { segments.last?.upper ?? 0 }
+
+        /// The closest value the sensor accepts.
+        func nearestSupported(_ dpi: Int) -> Int {
+            let clamped = min(max(dpi, minimum), maximum)
+            guard let segment = segments.first(where: { clamped <= $0.upper }) else { return clamped }
+            let offset = ((clamped - segment.lower) + segment.step / 2) / segment.step * segment.step
+            return min(segment.lower + offset, segment.upper)
+        }
+    }
+
+    /// `getSensorDpiRanges` pages: [4] sensor, [5] direction, [6] page, then 13 bytes of a big-endian word list
+    /// that continues across pages (a word can be split between two). A word ≥ 0xE000 is the step (low 13 bits)
+    /// between the values either side of it; 0x0000 ends the list.
+    static func parseDPIRanges(pages: [[UInt8]]) -> DPIRange? {
+        let data = pages.flatMap { $0.count >= 20 ? Array($0[7..<20]) : [] }
+        var words: [Int] = []
+        var index = 0
+        while index + 1 < data.count {
+            let word = (Int(data[index]) << 8) | Int(data[index + 1])
+            if word == 0 { break }
+            words.append(word)
+            index += 2
+        }
+
+        var segments: [DPIRange.Segment] = []
+        var previous: Int?
+        var pendingStep: Int?
+        for word in words {
+            if word >= 0xE000 {
+                pendingStep = word & 0x1FFF
+            } else {
+                if let lower = previous, let step = pendingStep, step > 0, word > lower {
+                    segments.append(.init(lower: lower, upper: word, step: step))
+                }
+                previous = word
+                pendingStep = nil
+            }
+        }
+        return segments.isEmpty ? nil : DPIRange(segments: segments)
+    }
+
+    /// Whether a ranges page holds the list's terminating 0x0000 word, so no further pages are needed.
+    static func dpiRangePageEndsList(_ page: [UInt8]) -> Bool {
+        guard page.count >= 20 else { return true }
+        let data = Array(page[7..<20])
+        return stride(from: 0, to: data.count - 1, by: 2).contains { data[$0] == 0 && data[$0 + 1] == 0 }
+    }
+
+    struct SensorDPI: Equatable, Sendable {
+        let dpi: Int
+        let liftOffDistance: UInt8
+    }
+
+    /// `getSensorDpiParameters` (function 5): [4] sensor, [5…6] DPI X, [7…8] default X, [9…10] DPI Y,
+    /// [11…12] default Y, [13] lift-off distance.
+    static func parseSensorDPI(_ reply: [UInt8]) -> SensorDPI? {
+        guard reply.count >= 14 else { return nil }
+        let dpi = (Int(reply[5]) << 8) | Int(reply[6])
+        return dpi > 0 ? SensorDPI(dpi: dpi, liftOffDistance: reply[13]) : nil
+    }
+
+    /// `setSensorDpiParameters` (function 6): sensor, DPI X, DPI Y, lift-off distance.
+    static func setSensorDPIParams(dpi: Int, liftOffDistance: UInt8) -> [UInt8] {
+        let value = UInt16(clamping: dpi)
+        return [0x00, UInt8(value >> 8), UInt8(value & 0xFF), UInt8(value >> 8), UInt8(value & 0xFF), liftOffDistance]
+    }
+
+    // MARK: Extended Report Rate (0x8061)
+
+    /// Report rates by flag bit / rate index: bit 0 = 125 Hz (8 ms) … bit 6 = 8000 Hz (125 µs).
+    static let reportRatesHz: [Int] = [125, 250, 500, 1000, 2000, 4000, 8000]
+
+    /// `getReportRateList` (function 1): [4…5] big-endian flags, one bit per supported rate.
+    static func parseSupportedReportRates(_ reply: [UInt8]) -> [Int] {
+        guard reply.count >= 6 else { return [] }
+        let flags = (Int(reply[4]) << 8) | Int(reply[5])
+        return reportRatesHz.indices.filter { flags & (1 << $0) != 0 }.map { reportRatesHz[$0] }
+    }
+
+    /// `getReportRate` (function 2): [4] rate index.
+    static func parseReportRate(_ reply: [UInt8]) -> Int? {
+        guard reply.count >= 5, reportRatesHz.indices.contains(Int(reply[4])) else { return nil }
+        return reportRatesHz[Int(reply[4])]
+    }
+
+    /// The rate index `setReportRate` (function 3) expects for a rate in Hz.
+    static func reportRateIndex(forHz hz: Int) -> UInt8? {
+        reportRatesHz.firstIndex(of: hz).map(UInt8.init)
+    }
+
+    // MARK: Onboard Profiles (0x8100)
+
+    enum OnboardMode: UInt8, Sendable {
+        /// The mouse runs from a profile stored on it; DPI and report rate changes are refused.
+        case onboard = 0x01
+        /// The host controls DPI and report rate directly, as Logitech G HUB does.
+        case host = 0x02
+    }
+}

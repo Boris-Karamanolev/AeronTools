@@ -25,6 +25,7 @@ nonisolated public enum HIDPPProtocol {
     public static let featureReprogControlsV4: UInt16 = 0x1B04
     public static let featureSmartShift: UInt16 = 0x2110
     public static let featureSmartShiftEnhanced: UInt16 = 0x2111
+    public static let featureHiResWheel: UInt16 = 0x2121
     public static let featureThumbwheel: UInt16 = 0x2150
     public static let featureAdjustableDPI: UInt16 = 0x2201
 
@@ -150,15 +151,20 @@ nonisolated public enum HIDPPProtocol {
         )
     }
 
-    /// Builds a `ReprogControlsV4.setCidReporting` (`0x1B04`, function `0x03`) packet to divert or undivert a control ID.
-    public static func setControlDivertedPacket(
+    /// Builds a `ReprogControlsV4.setCidReporting` (`0x1B04`, function `0x03`) packet that diverts a control to
+    /// HID++ (so only this app sees it) or hands it back to macOS. With `rawXY`, pointer motion while the control
+    /// is held is also diverted: the cursor stays still and the motion arrives as raw XY events.
+    public static func setControlReportingPacket(
         deviceIndex: UInt8,
         featureIndex: UInt8,
         controlID: UInt16,
-        diverted: Bool
+        diverted: Bool,
+        rawXY: Bool = false
     ) -> [UInt8] {
-        // Flags byte: bit 0 = divert (1) / undivert (0), bit 1 = dvalid (1 = update divert bit)
-        let flags: UInt8 = diverted ? 0x03 : 0x02
+        // Flags: bit 0 divert, bit 1 divert-valid, bit 4 raw XY, bit 5 raw-XY-valid.
+        var flags: UInt8 = 0x02 | 0x20
+        if diverted { flags |= 0x01 }
+        if diverted && rawXY { flags |= 0x10 }
         return makeLongPacket(
             deviceIndex: deviceIndex,
             featureIndex: featureIndex,
@@ -167,7 +173,54 @@ nonisolated public enum HIDPPProtocol {
         )
     }
 
+    /// Builds a `HiResWheel.setWheelMode` (`0x2121`, function `0x02`) packet. Diverted, wheel rotation arrives as
+    /// HID++ events instead of scrolling; low resolution keeps one event step per notch.
+    public static func setWheelModePacket(deviceIndex: UInt8, featureIndex: UInt8, diverted: Bool) -> [UInt8] {
+        // Mode byte: bit 0 target (1 = HID++), bit 1 high resolution, bit 2 invert.
+        makeLongPacket(deviceIndex: deviceIndex, featureIndex: featureIndex, functionID: 0x02, params: [diverted ? 0x01 : 0x00])
+    }
+
+    /// Builds a `Thumbwheel.setThumbwheelReporting` (`0x2150`, function `0x02`) packet.
+    public static func setThumbwheelReportingPacket(deviceIndex: UInt8, featureIndex: UInt8, diverted: Bool) -> [UInt8] {
+        // Params: reporting mode (0 = native, 1 = HID++), invert direction (0 = no).
+        makeLongPacket(deviceIndex: deviceIndex, featureIndex: featureIndex, functionID: 0x02, params: [diverted ? 0x01 : 0x00, 0x00])
+    }
+
     // MARK: Packet Parsers
+
+    /// Events carry function 0 and software ID 0; replies to this app's requests never do.
+    private static func isEvent(_ norm: [UInt8], featureIndex: UInt8, function: UInt8 = 0) -> Bool {
+        norm[2] == featureIndex && norm[3] == (function << 4)
+    }
+
+    private static func int16(_ hi: UInt8, _ lo: UInt8) -> Int {
+        Int(Int16(bitPattern: (UInt16(hi) << 8) | UInt16(lo)))
+    }
+
+    /// Parses a diverted `HiResWheel` movement event: signed notch delta, positive = rolled away from the user.
+    public static func parseWheelMovementEvent(_ report: [UInt8], expectedFeatureIndex: UInt8) -> Int? {
+        guard let norm = normalizeReport(report), norm.count >= 7, isEvent(norm, featureIndex: expectedFeatureIndex) else {
+            return nil
+        }
+        // [4] = resolution flag | periods, [5…6] = signed vertical delta.
+        return int16(norm[5], norm[6])
+    }
+
+    /// Parses a diverted `Thumbwheel` event: signed rotation in the wheel's diverted resolution.
+    public static func parseThumbwheelEvent(_ report: [UInt8], expectedFeatureIndex: UInt8) -> Int? {
+        guard let norm = normalizeReport(report), norm.count >= 6, isEvent(norm, featureIndex: expectedFeatureIndex) else {
+            return nil
+        }
+        // [4…5] = signed rotation, [6…7] = timestamp, [8] = rotation status, [9] = touch flags.
+        return int16(norm[4], norm[5])
+    }
+
+    /// Parses a `ReprogControlsV4` raw XY event (event `0x01`): pointer motion while a raw-XY control is held.
+    public static func parseRawXYEvent(_ report: [UInt8], expectedFeatureIndex: UInt8) -> (dx: Int, dy: Int)? {
+        guard let norm = normalizeReport(report), norm.count >= 8,
+              isEvent(norm, featureIndex: expectedFeatureIndex, function: 0x01) else { return nil }
+        return (int16(norm[4], norm[5]), int16(norm[6], norm[7]))
+    }
 
     /// Normalizes an incoming HID report (which may or may not have a leading report ID byte on BLE).
     public static func normalizeReport(_ bytes: [UInt8]) -> [UInt8]? {

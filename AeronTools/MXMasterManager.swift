@@ -57,6 +57,9 @@ public final class MXMasterManager {
     }
 
     public internal(set) var isConnected: Bool = false
+    /// True once the device has confirmed it is an MX Master: by its HID++ name behind a receiver, or by
+    /// its product name over a direct link. A receiver alone, or another Logitech device on it, never counts.
+    public internal(set) var isIdentified: Bool = false
     /// Input Monitoring (TCC ListenEvent) is required to open the mouse's HID++ channel.
     public internal(set) var hasInputMonitoringAccess: Bool = IOHIDCheckAccess(kIOHIDRequestTypeListenEvent) == kIOHIDAccessTypeGranted
     public private(set) var isMonitoring: Bool = false
@@ -70,13 +73,10 @@ public final class MXMasterManager {
     @ObservationIgnored var featureTable: [UInt16: UInt8] = [:]
     @ObservationIgnored var pressedDivertedCIDs: Set<UInt16> = []
     @ObservationIgnored var inputMonitoringObserver: NSObjectProtocol?
+    /// Asks a receiver-connected device for its name; shares the device with the MX feature code.
+    @ObservationIgnored var identitySession: HIDPPSession?
+    @ObservationIgnored var identifyTask: Task<Void, Never>?
 
-    @ObservationIgnored var eventTap: CFMachPort?
-    @ObservationIgnored var runLoopSource: CFRunLoopSource?
-    /// Pointer-motion tap, enabled only while the gesture button is held so ordinary mouse movement never
-    /// round-trips through the main thread.
-    @ObservationIgnored var gestureTap: CFMachPort?
-    @ObservationIgnored var gestureRunLoopSource: CFRunLoopSource?
     @ObservationIgnored private var dpiDebounceTask: Task<Void, Never>?
     @ObservationIgnored private var smartShiftDebounceTask: Task<Void, Never>?
 
@@ -89,6 +89,8 @@ public final class MXMasterManager {
     @ObservationIgnored var smoothScrollVelocityY: Double = 0
     @ObservationIgnored private var smoothScrollVelocityX: Double = 0
     @ObservationIgnored var smoothScrollTimer: Timer?
+    /// Fractional lines carried between notches when smooth scrolling is off.
+    @ObservationIgnored var pendingLineScroll: Double = 0
 
     // Low-Battery Alert State
     @ObservationIgnored private var hasSentLowBatteryAlert = false
@@ -106,12 +108,6 @@ public final class MXMasterManager {
         } else {
             self.cardOptions = MXMasterCardOptions()
         }
-        AccessibilityPermission.shared.onChange { [weak self] in
-            guard let self else { return }
-            // A revoked permission leaves dead taps behind, so tear them down before re-evaluating.
-            if !AccessibilityPermission.shared.isGranted { self.stopEventTap() }
-            self.updateEventTapState()
-        }
         // Bluetooth LE mice report battery through macOS power sources instead of HID++ events.
         PowerSource.onChange { [weak self] in
             guard let self, self.isConnected, !self.snapshot.hidppConnected else { return }
@@ -124,7 +120,6 @@ public final class MXMasterManager {
     public func start() {
         setupHIDManager()
         refreshDeviceState()
-        updateEventTapState()
     }
 
     /// Fetches fresh state once when the card is shown. After that everything is event-driven: the mouse
@@ -175,14 +170,8 @@ public final class MXMasterManager {
             }
         }
 
-        if oldValue.gesturesEnabled != newValue.gesturesEnabled
-            || oldValue.gestureButtonClickAction != newValue.gestureButtonClickAction
-            || oldValue.modeShiftButtonAction != newValue.modeShiftButtonAction
-            || oldValue.hapticPanelButtonAction != newValue.hapticPanelButtonAction {
-            configureDivertedButtonsIfNeeded()
-        }
-
-        updateEventTapState()
+        // Scroll, thumbwheel, button and gesture settings all live on the mouse as HID++ diversions.
+        applyInputDiversion()
     }
 
     /// Immediately pushes the current DPI, SmartShift, and button diversion configuration to the mouse.
@@ -193,7 +182,7 @@ public final class MXMasterManager {
             smartShiftEnabled: config.smartShiftEnabled,
             threshold: config.smartShiftThreshold
         )
-        configureDivertedButtonsIfNeeded()
+        applyInputDiversion()
         requestBatteryFromHIDPP()
     }
 

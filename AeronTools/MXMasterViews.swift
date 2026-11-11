@@ -14,60 +14,18 @@ public struct MXMasterCardView: View {
 
     public var body: some View {
         let snapshot = manager.snapshot
-        let tint = Color.accentColor
         let options = manager.cardOptions
 
         VStack(alignment: .leading, spacing: 10) {
-            // Header Row
-            HStack(alignment: .center, spacing: 10) {
-                ZStack {
-                    Circle()
-                        .fill(tint.opacity(0.18))
-                        .frame(width: 30, height: 30)
-                    Image(systemName: "computermouse.fill")
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(tint)
-                }
-
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(snapshot.deviceName)
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(.primary)
-                        .lineLimit(1)
-
-                    HStack(spacing: 4) {
-                        Circle()
-                            .fill(Color.green)
-                            .frame(width: 5, height: 5)
-                        Text(snapshot.transport.rawValue)
-                            .font(.system(size: 11))
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                    }
-                }
-
-                Spacer()
-
-                // Right-hand Primary Readout: Battery % (if available) or DPI
+            // Header Row: shared with every accessory card; DPI stands in when no battery level is reported
+            AccessoryCardHeader(
+                systemImage: "computermouse.fill",
+                name: snapshot.deviceName,
+                status: snapshot.transport.rawValue,
+                isOnline: true
+            ) {
                 if let battery = snapshot.batteryPercent {
-                    VStack(alignment: .trailing, spacing: 1) {
-                        HStack(alignment: .firstTextBaseline, spacing: 2) {
-                            if snapshot.isCharging {
-                                Image(systemName: "bolt.fill")
-                                    .font(.system(size: 10, weight: .bold))
-                                    .foregroundStyle(.green)
-                            }
-                            Text("\(battery)")
-                                .font(.system(size: 18, weight: .bold, design: .rounded))
-                                .foregroundStyle(battery < 20 && !snapshot.isCharging ? Color.red : Color.primary)
-                            Text("%")
-                                .font(.system(size: 11, weight: .semibold, design: .rounded))
-                                .foregroundStyle(.secondary)
-                        }
-                        Text(snapshot.isCharging ? "Charging" : "Battery")
-                            .font(.system(size: 9, weight: .medium))
-                            .foregroundStyle(.tertiary)
-                    }
+                    AccessoryBatteryBadge(percent: battery, isCharging: snapshot.isCharging)
                 } else {
                     VStack(alignment: .trailing, spacing: 1) {
                         HStack(alignment: .firstTextBaseline, spacing: 2) {
@@ -262,15 +220,7 @@ public struct MXMasterCardView: View {
                 }
             }
         }
-        .padding(11)
-        .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(Color(nsColor: .quaternaryLabelColor).opacity(0.15))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.5)
-                )
-        )
+        .accessoryCardStyle()
     }
 }
 
@@ -365,7 +315,7 @@ public struct MXMasterSettingsTabView: View {
                 HStack {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .foregroundStyle(.orange)
-                    Text("Input Monitoring permission is required to read battery and DPI and to change settings on the mouse. If it's already on, quit and reopen Aeron Tools.")
+                    Text("Input Monitoring permission is required to read battery and DPI, and for every scroll, button and gesture setting, since those are handled on the mouse itself. If it's already on, quit and reopen Aeron Tools.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     Spacer()
