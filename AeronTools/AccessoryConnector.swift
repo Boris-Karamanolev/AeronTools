@@ -78,6 +78,7 @@ enum AccessoryRegistry {
         MXMasterManager.shared,
         LogitechGConnector.shared,
         MXMechanicalConnector.shared,
+        LogitechG515Connector.shared,
     ]
 
     static var available: [any AccessoryConnector] {

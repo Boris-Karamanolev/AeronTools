@@ -57,38 +57,54 @@ struct PermissionNotice: View {
     }
 }
 
-/// A whole-number slider that only reports its value when released, so dragging sends a single change
-/// (one write to a device instead of dozens).
+/// A whole-number slider. By default it reports its value once, when released, so dragging sends a single
+/// write to a device (needed for memory writes like an onboard profile). With `commitsWhileDragging`, every step
+/// is reported as it's reached, for cheap live settings like keyboard brightness. Either way the slider keeps
+/// showing the chosen value until the model catches up, so it never jumps back while a device replies.
 struct LevelSlider: View {
     let title: String
     let value: Int
     let range: ClosedRange<Int>
     /// Shown instead of the number at the lowest level, e.g. "Off".
     var lowestLabel: String?
+    var commitsWhileDragging = false
     let onCommit: (Int) -> Void
 
-    @State private var draft: Double?
+    @State private var draft: Int?
+    @State private var isEditing = false
 
-    private var shown: Int { draft.map { Int($0.rounded()) } ?? value }
+    private var shown: Int { draft ?? value }
 
     var body: some View {
         LabeledContent(title) {
             HStack(spacing: 10) {
                 Slider(
-                    value: Binding(get: { draft ?? Double(value) }, set: { draft = $0 }),
+                    value: Binding(
+                        get: { Double(shown) },
+                        set: { newValue in
+                            let level = Int(newValue.rounded())
+                            guard level != draft else { return }
+                            draft = level
+                            if commitsWhileDragging && level != value { onCommit(level) }
+                        }
+                    ),
                     in: Double(range.lowerBound)...Double(range.upperBound),
                     step: 1
-                ) { isEditing in
-                    guard !isEditing, let draft else { return }
-                    self.draft = nil
-                    let committed = Int(draft.rounded())
-                    if committed != value { onCommit(committed) }
+                ) { editing in
+                    isEditing = editing
+                    guard !editing, let draft, !commitsWhileDragging, draft != value else { return }
+                    onCommit(draft)
                 }
                 .frame(width: 180)
                 Text(shown == range.lowerBound ? (lowestLabel ?? "\(shown)") : "\(shown)")
                     .monospacedDigit()
                     .frame(width: 40, alignment: .trailing)
             }
+        }
+        // The device confirmed the value, or reported another one after the drag ended (e.g. it refused the
+        // change): show the model again.
+        .onChange(of: value) { _, newValue in
+            if draft == newValue || !isEditing { draft = nil }
         }
     }
 }
@@ -199,5 +215,75 @@ struct PermissionStatusRow: View {
                     .controlSize(.small)
             }
         }
+    }
+}
+
+/// One key in a `KeyRowPicker`: its label (e.g. "F4"), the symbol printed on it, and whether it can be remapped.
+struct KeyCapInfo: Identifiable {
+    let id: Int
+    let label: String
+    let systemImage: String?
+    var isEnabled = true
+}
+
+/// A row of keycaps drawn as outlines with their printed symbols. Clicking a key opens a menu to pick its
+/// action; remapped keys are outlined in the accent colour.
+struct KeyRowPicker: View {
+    let keys: [KeyCapInfo]
+    let action: (Int) -> AccessoryButtonAction
+    let onSelect: (Int, AccessoryButtonAction) -> Void
+    var actions: [AccessoryButtonAction] = AccessoryButtonAction.general
+    /// Names the key's own function in place of "System Default".
+    var defaultTitle = "Key's Own Function"
+
+    var body: some View {
+        HStack(spacing: 5) {
+            ForEach(keys) { key in
+                Menu {
+                    Picker(key.label, selection: Binding(
+                        get: { action(key.id) },
+                        set: { onSelect(key.id, $0) }
+                    )) {
+                        ForEach(actions) { option in
+                            Text(option == .systemDefault ? defaultTitle : option.title).tag(option)
+                        }
+                    }
+                    .pickerStyle(.inline)
+                } label: {
+                    KeyCap(key: key, isRemapped: action(key.id) != .systemDefault)
+                }
+                .menuStyle(.button)
+                .buttonStyle(.plain)
+                .menuIndicator(.hidden)
+                .disabled(!key.isEnabled)
+                .opacity(key.isEnabled ? 1 : 0.4)
+                .help(action(key.id) == .systemDefault ? key.label : "\(key.label): \(action(key.id).title)")
+            }
+        }
+        .frame(maxWidth: .infinity)
+    }
+}
+
+private struct KeyCap: View {
+    let key: KeyCapInfo
+    let isRemapped: Bool
+
+    var body: some View {
+        VStack(spacing: 3) {
+            if let systemImage = key.systemImage {
+                Image(systemName: systemImage)
+                    .font(.system(size: 11))
+            }
+            Text(key.label)
+                .font(.system(size: 8, weight: .medium))
+                .foregroundStyle(.secondary)
+        }
+        .frame(width: 36, height: 34)
+        .background(RoundedRectangle(cornerRadius: 6).fill(isRemapped ? Color.accentColor.opacity(0.15) : Color.clear))
+        .overlay(
+            RoundedRectangle(cornerRadius: 6)
+                .strokeBorder(isRemapped ? Color.accentColor : Color.secondary.opacity(0.5), lineWidth: 1)
+        )
+        .contentShape(RoundedRectangle(cornerRadius: 6))
     }
 }

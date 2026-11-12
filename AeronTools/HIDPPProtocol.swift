@@ -10,15 +10,12 @@ nonisolated public enum HIDPPProtocol {
 
     public static let shortReportID: UInt8 = 0x10
     public static let longReportID: UInt8 = 0x11
-    public static let shortReportLength: Int = 7
     public static let longReportLength: Int = 20
 
     /// Software identifier nibble (1...15) used by Aeron Tools to tag requests and match replies.
     public static let softwareID: UInt8 = 0x0A
 
     // HID++ 2.0 Feature IDs
-    public static let featureRoot: UInt16 = 0x0000
-    public static let featureFeatureSet: UInt16 = 0x0001
     public static let featureDeviceName: UInt16 = 0x0005
     public static let featureBatteryStatus: UInt16 = 0x1000
     public static let featureUnifiedBattery: UInt16 = 0x1004
@@ -57,35 +54,6 @@ nonisolated public enum HIDPPProtocol {
             packet[4 + i] = byte
         }
         return packet
-    }
-
-    /// Builds a 7-byte HID++ 2.0 short request packet.
-    public static func makeShortPacket(
-        deviceIndex: UInt8,
-        featureIndex: UInt8,
-        functionID: UInt8,
-        swID: UInt8 = softwareID,
-        params: [UInt8] = []
-    ) -> [UInt8] {
-        var packet = [UInt8](repeating: 0, count: shortReportLength)
-        packet[0] = shortReportID
-        packet[1] = deviceIndex
-        packet[2] = featureIndex
-        packet[3] = ((functionID & 0x0F) << 4) | (swID & 0x0F)
-        for (i, byte) in params.prefix(shortReportLength - 4).enumerated() {
-            packet[4 + i] = byte
-        }
-        return packet
-    }
-
-    /// Builds an `IRoot.getFeature(featureID)` request to look up a feature's runtime index table slot.
-    public static func getFeatureIndexPacket(deviceIndex: UInt8, featureID: UInt16) -> [UInt8] {
-        makeLongPacket(
-            deviceIndex: deviceIndex,
-            featureIndex: 0x00,
-            functionID: 0x00,
-            params: [UInt8(featureID >> 8), UInt8(featureID & 0xFF)]
-        )
     }
 
     /// Builds a `UnifiedBattery.getStatus` (`0x1004`, function `0x01`) request.

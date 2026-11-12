@@ -18,14 +18,18 @@ final class LogitechGConnector {
 
     /// LIGHTSPEED receiver product IDs. Bolt/Unifying receivers belong to the MX Master connector.
     nonisolated static let lightspeedReceiverIDs: [Int] = [0xC539, 0xC53A, 0xC53F, 0xC545, 0xC547, 0xC54D]
-    /// LIGHTSPEED receivers host one device, in slot 1.
-    private static let receiverSlot: UInt8 = 0x01
 
-    private(set) var deviceName: String?
+    /// Finds the mouse on whichever LIGHTSPEED receiver it's paired to (each receiver hosts one device, in slot 1),
+    /// and follows its name, wake state and battery.
+    @ObservationIgnored let device = HIDPPReceiverDevice(
+        productIDs: lightspeedReceiverIDs, slots: 1...1, alertID: "logitech.g-mouse", matches: { $0.isPointingDevice }
+    )
+
+    var deviceName: String? { device.deviceName }
     /// The mouse is awake and answering; false while it sleeps (the receiver still knows it's paired).
-    private(set) var isOnline = false
-    private(set) var batteryPercent: Int?
-    private(set) var isCharging = false
+    var isOnline: Bool { device.isOnline }
+    var batteryPercent: Int? { device.batteryPercent }
+    var isCharging: Bool { device.isCharging }
 
     // Performance (read from the mouse; nil until it has answered)
     private(set) var dpi: Int?
@@ -63,10 +67,7 @@ final class LogitechGConnector {
         var forward: AccessoryButtonAction = .systemDefault
     }
 
-    @ObservationIgnored private let monitor = HIDPPReceiverMonitor(productIDs: lightspeedReceiverIDs)
-    @ObservationIgnored private var session: HIDPPSession?
-    @ObservationIgnored private var identifyTask: Task<Void, Never>?
-    @ObservationIgnored private var batteryFeature: HIDPPSession.BatteryFeature?
+    private var session: HIDPPSession? { device.session }
     @ObservationIgnored private var dpiFeatureIndex: UInt8?
     @ObservationIgnored private var reportRateFeatureIndex: UInt8?
     @ObservationIgnored private var onboardFeatureIndex: UInt8?
@@ -85,63 +86,13 @@ final class LogitechGConnector {
     // MARK: Lifecycle
 
     fileprivate func setUp() {
-        monitor.onReceiversChanged = { [weak self] in self?.refresh() }
-        monitor.onReport = { [weak self] report, device in self?.handle(report: report, from: device) }
-        monitor.start()
-        refresh()
-    }
-
-    // MARK: Device State
-
-    /// Re-reads which receiver is attached and asks the mouse on it who it is.
-    fileprivate func refresh() {
-        guard let receiver = monitor.receivers.first else {
-            clearDevice()
-            return
-        }
-        var isNewReceiver = false
-        if session?.device !== receiver {
-            session = HIDPPSession(device: receiver, deviceIndex: Self.receiverSlot)
-            session?.onEvent = { [weak self] event in self?.handle(event: event) }
-            isNewReceiver = true
-        }
-        identify(enablingNotifications: isNewReceiver)
-    }
-
-    private func identify(enablingNotifications: Bool = false) {
-        guard let session else { return }
-        identifyTask?.cancel()
-        identifyTask = Task { [weak self] in
-            if enablingNotifications {
-                await session.enableReceiverConnectionNotifications()
-            }
-            // 1. The receiver says what's paired, even while the mouse sleeps. Nothing paired, or not a mouse: no card.
-            guard let paired = await session.receiverPairedDevice(), paired.isPointingDevice else {
-                guard let self, self.session === session else { return }
-                self.clearDevice(keepSession: true)
-                return
-            }
-            guard let self, !Task.isCancelled, self.session === session else { return }
-            if self.deviceName == nil {
-                self.deviceName = paired.name
-            }
-
-            // 2. If the mouse is awake it answers over HID++ 2.0 with its full name and battery.
-            // Feature indices differ between mice, so never reuse ones learned from a previously paired device.
-            session.reset()
-            guard let identity = await session.identify(), !Task.isCancelled, self.session === session else {
-                self.isOnline = false
-                return
-            }
-            self.isOnline = true
-            self.deviceName = identity.name
-            await self.loadBattery(using: session)
+        device.onOnline = { [weak self] session in
             // Also runs after every reconnect: the mouse drops back to its onboard profile when it powers off.
-            #if DEBUG
-            if HIDPPTrace.isEnabled { return }
-            #endif
-            await self.takeControl(using: session)
+            await self?.takeControl(using: session)
         }
+        device.onEvent = { [weak self] event in self?.handle(event: event) }
+        device.onOffline = { [weak self] in self?.deviceWentOffline() }
+        device.start()
     }
 
     // MARK: Performance (DPI & Report Rate)
@@ -468,25 +419,14 @@ final class LogitechGConnector {
         }
     }
 
-    private func loadBattery(using session: HIDPPSession) async {
-        batteryFeature = await session.batteryFeature()
-        if let feature = batteryFeature, let reading = await session.readBattery(feature) {
-            apply(reading)
-        }
-    }
-
-    private func apply(_ reading: HIDPPProtocol.BatteryReading) {
-        if batteryPercent != reading.percentage { batteryPercent = reading.percentage }
-        if isCharging != reading.isCharging { isCharging = reading.isCharging }
-        AccessoryBatteryAlerts.shared.report(id: id, name: accessoryName, percent: batteryPercent, isCharging: isCharging)
-    }
-
-    private func clearDevice(keepSession: Bool = false) {
-        if !keepSession {
-            identifyTask?.cancel()
-            session = nil
-        }
-        batteryFeature = nil
+    /// The mouse fell asleep or went away. It returns to its onboard profile when it powers off, so host mode,
+    /// press reporting and the button map are re-applied on reconnect; if it's gone entirely, forget its features.
+    private func deviceWentOffline() {
+        isInHostMode = false
+        isSpying = false
+        lastButtonMask = 0
+        canControlPerformance = false
+        guard !device.isAvailable else { return }
         dpiFeatureIndex = nil
         reportRateFeatureIndex = nil
         onboardFeatureIndex = nil
@@ -505,43 +445,14 @@ final class LogitechGConnector {
         supportedReportRates = []
         canControlPerformance = false
         onboardProfile = nil
-        deviceName = nil
-        isOnline = false
-        batteryPercent = nil
-        isCharging = false
     }
 
     // MARK: Incoming Reports
 
-    private func handle(report: [UInt8], from device: IOHIDDevice) {
-        guard let session, session.device === device else { return }
-        session.handle(report: report)
-    }
-
+    /// Events beyond battery and link changes, which `device` handles.
     private func handle(event: [UInt8]) {
-        // HID++ 1.0 "device connection" notification from the receiver: the mouse woke, slept, or re-paired.
-        // Byte 4 bit 6 set means the link is down.
-        if event[2] == 0x41 {
-            if event[4] & 0x40 != 0 {
-                isOnline = false
-                // The mouse returns to its onboard profile when it powers off; host mode, press reporting and
-                // the button map are re-applied on reconnect.
-                isInHostMode = false
-                isSpying = false
-                lastButtonMask = 0
-                canControlPerformance = false
-            } else {
-                identify()
-            }
-            return
-        }
         if let index = spyFeatureIndex, let mask = HIDPPProtocol.parseButtonSpyEvent(event, expectedFeatureIndex: index) {
             handleButtonMask(mask)
-            return
-        }
-        // Battery changes the mouse pushes on its own (same layout as the getStatus reply).
-        if let feature = batteryFeature, let reading = HIDPPSession.batteryReading(from: event, feature: feature) {
-            apply(reading)
         }
     }
 }
@@ -569,14 +480,11 @@ extension LogitechGConnector: AccessoryConnector {
     }
 
     func systemDidWake() {
-        refresh()
+        device.refresh()
     }
 
     func popoverWillShow() {
-        // Picks up an Input Monitoring grant made in System Settings, then re-identifies the mouse once.
-        if monitor.isOpen || monitor.openIfPermitted() {
-            refresh()
-        }
+        device.popoverWillShow()
     }
 
     /// Nothing runs on a timer, so there's no card-only work to start or stop.

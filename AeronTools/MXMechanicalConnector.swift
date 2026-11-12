@@ -14,24 +14,40 @@ final class MXMechanicalConnector {
     static let shared = MXMechanicalConnector()
 
     nonisolated static let receiverIDs = [HIDPPProtocol.boltReceiverProductID, HIDPPProtocol.unifyingReceiverProductID]
-    private static let slots: ClosedRange<UInt8> = 1...6
 
-    private(set) var deviceName: String?
+    /// Finds the keyboard in any slot of any Bolt or Unifying receiver, and follows its name, wake state and battery.
+    @ObservationIgnored let device = HIDPPReceiverDevice(
+        productIDs: receiverIDs, slots: 1...6, alertID: "logitech.mx-mechanical",
+        matches: { $0.kind == .keyboard && isMXMechanical($0.name) }
+    )
+
+    var deviceName: String? { device.deviceName }
     /// The keyboard is awake and answering; false while it sleeps (the receiver still knows it's paired).
-    private(set) var isOnline = false
-    private(set) var batteryPercent: Int?
-    private(set) var isCharging = false
+    var isOnline: Bool { device.isOnline }
+    var batteryPercent: Int? { device.batteryPercent }
+    var isCharging: Bool { device.isCharging }
     /// The backlight configuration as the keyboard last reported it; nil until it has answered.
     private(set) var backlight: HIDPPProtocol.BacklightConfig?
-    /// The keyboard can't report its effect, so this is the last one chosen here.
-    private(set) var backlightEffect: HIDPPProtocol.BacklightEffect? = UserDefaults.standard.object(forKey: "mxMechanical.backlightEffect")
-        .flatMap { $0 as? Int }.flatMap { HIDPPProtocol.BacklightEffect(rawValue: UInt8(clamping: $0)) }
+    /// The effect as the keyboard reports it.
+    private(set) var backlightEffect: HIDPPProtocol.BacklightEffect?
+    /// F1–F12 act as standard function keys (true) or media keys (false); nil until read.
+    private(set) var fnKeysAreStandard: Bool?
+    /// The F-keys, by position (1 = F1). Only divertable ones can be remapped (Easy-Switch keys can't).
+    private(set) var fKeyControls: [Int: HIDPPProtocol.KeyControl] = [:]
+    /// Actions assigned to F-keys, by position. Keys left out keep their printed function.
+    private(set) var keyActions: [Int: AccessoryButtonAction] = [:]
 
-    @ObservationIgnored private let monitor = HIDPPReceiverMonitor(productIDs: receiverIDs)
-    @ObservationIgnored private var session: HIDPPSession?
-    @ObservationIgnored private var identifyTask: Task<Void, Never>?
-    @ObservationIgnored private var batteryFeature: HIDPPSession.BatteryFeature?
+    private var session: HIDPPSession? { device.session }
     @ObservationIgnored private var backlightIndex: UInt8?
+    @ObservationIgnored private var fnIndex: UInt8?
+    @ObservationIgnored private var reprogIndex: UInt8?
+    @ObservationIgnored private var hostIndex: UInt8 = 0
+    /// Controls this app diverted; only these are ever handed back, so Options+'s own remaps are left alone.
+    @ObservationIgnored private var divertedCIDs: Set<UInt16> = []
+    @ObservationIgnored private var pressedCIDs: Set<UInt16> = []
+    /// The newest configuration waiting to be written; rapid changes (a dragged slider) collapse into it.
+    @ObservationIgnored private var pendingBacklight: HIDPPProtocol.BacklightConfig?
+    @ObservationIgnored private var isWritingBacklight = false
 
     private init() {}
 
@@ -44,71 +60,112 @@ final class MXMechanicalConnector {
     // MARK: Lifecycle
 
     fileprivate func setUp() {
-        monitor.onReceiversChanged = { [weak self] in self?.refresh() }
-        monitor.onReport = { [weak self] report, device in
-            guard let self, let session = self.session, session.device === device else { return }
-            session.handle(report: report)
+        device.onOnline = { [weak self] session in
+            await self?.loadBacklight(using: session)
+            await self?.loadKeys(using: session)
         }
-        monitor.start()
-        refresh()
+        device.onEvent = { [weak self] event in self?.handle(event: event) }
+        device.onOffline = { [weak self] in self?.deviceWentOffline() }
+        device.start()
     }
 
-    /// Re-reads which receiver is attached and finds the keyboard on it.
-    fileprivate func refresh() {
-        guard let receiver = monitor.receivers.first else {
-            clearDevice()
-            return
+    // MARK: Fn Keys & Remapping
+
+    private func loadKeys(using session: HIDPPSession) async {
+        if let changeHost = await session.featureIndex(for: HIDPPProtocol.featureChangeHost),
+           let reply = await session.request(featureIndex: changeHost, function: 0x00),
+           let host = HIDPPProtocol.parseCurrentHost(reply) {
+            hostIndex = host
         }
-        identify(on: receiver, enablingNotifications: session?.device !== receiver)
+        fnIndex = await session.featureIndex(for: HIDPPProtocol.featureFnInversion)
+        await readFnKeys(using: session)
+
+        reprogIndex = await session.featureIndex(for: HIDPPProtocol.featureReprogControlsV4)
+        guard let index = reprogIndex, let countReply = await session.request(featureIndex: index, function: 0x00) else { return }
+        var controls: [Int: HIDPPProtocol.KeyControl] = [:]
+        for controlIndex in 0..<countReply[4] {
+            guard let reply = await session.request(featureIndex: index, function: 0x01, params: [controlIndex]),
+                  let control = HIDPPProtocol.parseKeyControl(reply),
+                  (1...12).contains(control.fKeyPosition) else { continue }
+            controls[control.fKeyPosition] = control
+        }
+        guard self.session === session else { return }
+        fKeyControls = controls
+        keyActions = savedKeyActions.filter { controls[$0.key]?.isDivertable == true }
+        // Diversions don't survive the keyboard powering off; this runs again on every wake.
+        divertedCIDs.removeAll()
+        for position in keyActions.keys {
+            await applyKeyAction(at: position, using: session)
+        }
     }
 
-    private func identify(on receiver: IOHIDDevice, enablingNotifications: Bool) {
-        identifyTask?.cancel()
-        identifyTask = Task { [weak self] in
-            guard let self else { return }
-            let family: HIDPPSession.ReceiverFamily =
-                HIDPPReceiverMonitor.productID(of: receiver) == HIDPPProtocol.boltReceiverProductID ? .bolt : .unifying
+    private func readFnKeys(using session: HIDPPSession) async {
+        guard let index = fnIndex,
+              let reply = await session.request(featureIndex: index, function: 0x00, params: [hostIndex]),
+              self.session === session else { return }
+        fnKeysAreStandard = HIDPPProtocol.parseFnInversion(reply, host: hostIndex)
+    }
 
-            // 1. Find the keyboard's slot from the pairing records; the receiver answers even while it sleeps.
-            var found: (slot: UInt8, name: String)?
-            for slot in Self.slots {
-                let probe = HIDPPSession(device: receiver, deviceIndex: slot)
-                self.session = probe
-                if enablingNotifications && slot == Self.slots.lowerBound {
-                    await probe.enableReceiverConnectionNotifications()
-                }
-                if let paired = await probe.receiverPairedDevice(family: family),
-                   paired.kind == .keyboard, Self.isMXMechanical(paired.name) {
-                    found = (slot, paired.name)
-                    break
-                }
-                guard !Task.isCancelled else { return }
-            }
-            guard !Task.isCancelled else { return }
-            guard let found else {
-                self.clearDevice()
-                return
-            }
+    func setFnKeysAreStandard(_ standard: Bool) {
+        guard let session, let index = fnIndex else { return }
+        fnKeysAreStandard = standard
+        Task { [weak self] in
+            _ = await session.request(featureIndex: index, function: 0x01, params: [self?.hostIndex ?? 0, standard ? 0x01 : 0x00])
+            await self?.readFnKeys(using: session)
+        }
+    }
 
-            let session = HIDPPSession(device: receiver, deviceIndex: found.slot)
-            session.onEvent = { [weak self] event in self?.handle(event: event) }
-            self.session = session
-            if self.deviceName == nil {
-                self.deviceName = found.name
-            }
+    func setKeyAction(_ action: AccessoryButtonAction, at position: Int) {
+        guard let session else { return }
+        keyActions[position] = action == .systemDefault ? nil : action
+        saveKeyActions()
+        Task { await self.applyKeyAction(at: position, using: session) }
+    }
 
-            // 2. Awake, the keyboard answers with its full name and battery.
-            guard let identity = await session.identify(), !Task.isCancelled, self.session === session else {
-                self.isOnline = false
-                return
-            }
-            self.isOnline = true
-            self.deviceName = identity.name
-            self.batteryFeature = await session.batteryFeature()
-            if let feature = self.batteryFeature, let reading = await session.readBattery(feature) {
-                self.apply(reading)
-            }
-            await self.loadBacklight(using: session)
+    /// Diverts a remapped key so its presses reach only this app, or hands a key this app diverted back to macOS.
+    private func applyKeyAction(at position: Int, using session: HIDPPSession) async {
+        guard let index = reprogIndex, let control = fKeyControls[position], control.isDivertable else { return }
+        let diverts = keyActions[position] != nil
+        guard diverts || divertedCIDs.contains(control.cid) else { return }
+        let packet = HIDPPProtocol.setControlReportingPacket(
+            deviceIndex: session.deviceIndex, featureIndex: index, controlID: control.cid, diverted: diverts
+        )
+        guard await session.request(packet: packet) != nil else { return }
+        if diverts { divertedCIDs.insert(control.cid) } else { divertedCIDs.remove(control.cid) }
+    }
+
+    /// Hands every key this app diverted back to macOS, so the keyboard works normally once the app has quit.
+    fileprivate func releaseKeys() {
+        guard let session, let index = reprogIndex else { return }
+        for cid in divertedCIDs {
+            session.sendWithoutReply(featureIndex: index, function: 0x03, params: [UInt8(cid >> 8), UInt8(cid & 0xFF), 0x22])
+        }
+        divertedCIDs.removeAll()
+    }
+
+    /// A diverted-keys event: run the action of each remapped key that was just pressed.
+    private func handleDivertedKeys(_ cids: [UInt16]) {
+        let pressed = Set(cids)
+        let newlyPressed = pressed.subtracting(pressedCIDs)
+        pressedCIDs = pressed
+        for cid in newlyPressed {
+            guard let position = fKeyControls.first(where: { $0.value.cid == cid })?.key,
+                  let action = keyActions[position] else { continue }
+            AccessoryActions.perform(action)
+        }
+    }
+
+    private var savedKeyActions: [Int: AccessoryButtonAction] {
+        guard let name = deviceName, let data = UserDefaults.standard.data(forKey: "mxMechanical.\(name).keyActions"),
+              let stored = try? JSONDecoder().decode([String: AccessoryButtonAction].self, from: data) else { return [:] }
+        return Dictionary(uniqueKeysWithValues: stored.compactMap { key, action in Int(key).map { ($0, action) } })
+    }
+
+    private func saveKeyActions() {
+        guard let name = deviceName else { return }
+        let stored = Dictionary(uniqueKeysWithValues: keyActions.map { (String($0.key), $0.value) })
+        if let data = try? JSONEncoder().encode(stored) {
+            UserDefaults.standard.set(data, forKey: "mxMechanical.\(name).keyActions")
         }
     }
 
@@ -124,59 +181,60 @@ final class MXMechanicalConnector {
               let reply = await session.request(featureIndex: index, function: 0x00),
               self.session === session else { return }
         backlight = HIDPPProtocol.parseBacklightConfig(reply)
+        if let info = await session.request(featureIndex: index, function: 0x02), self.session === session {
+            backlightEffect = HIDPPProtocol.parseBacklightEffect(info)
+        }
     }
 
-    /// Writes a configuration, then reads it back so Settings always shows what the keyboard actually uses.
+    /// Shows the change at once, writes it (merging rapid changes into the latest), then reads the configuration
+    /// back so Settings ends up showing what the keyboard actually uses.
     func setBacklight(_ config: HIDPPProtocol.BacklightConfig) {
         guard let session, let index = backlightIndex else { return }
+        backlight = config
+        pendingBacklight = config
+        guard !isWritingBacklight else { return }
+        isWritingBacklight = true
         Task { [weak self] in
-            _ = await session.request(featureIndex: index, function: 0x01, params: HIDPPProtocol.setBacklightConfigParams(config))
+            while let self, let next = self.pendingBacklight {
+                self.pendingBacklight = nil
+                _ = await session.request(featureIndex: index, function: 0x01, params: HIDPPProtocol.setBacklightConfigParams(next))
+            }
+            self?.isWritingBacklight = false
             await self?.readBacklight(using: session)
         }
     }
 
     func setBacklightEffect(_ effect: HIDPPProtocol.BacklightEffect) {
         guard let session, let index = backlightIndex else { return }
+        backlightEffect = effect
         Task { [weak self] in
-            guard await session.request(featureIndex: index, function: 0x03, params: [effect.rawValue]) != nil,
-                  let self, self.session === session else { return }
-            self.backlightEffect = effect
-            UserDefaults.standard.set(Int(effect.rawValue), forKey: "mxMechanical.backlightEffect")
+            _ = await session.request(featureIndex: index, function: 0x03, params: [effect.rawValue])
+            // Read back what the keyboard actually switched to.
+            await self?.readBacklight(using: session)
         }
     }
 
-    private func apply(_ reading: HIDPPProtocol.BatteryReading) {
-        if batteryPercent != reading.percentage { batteryPercent = reading.percentage }
-        if isCharging != reading.isCharging { isCharging = reading.isCharging }
-        AccessoryBatteryAlerts.shared.report(id: id, name: accessoryName, percent: batteryPercent, isCharging: isCharging)
-    }
-
-    private func clearDevice() {
-        identifyTask?.cancel()
-        session = nil
-        batteryFeature = nil
+    /// The keyboard fell asleep or went away. Its diversions end when it powers off and are re-applied on wake;
+    /// if it's gone entirely, forget its features.
+    private func deviceWentOffline() {
+        pressedCIDs.removeAll()
+        guard !device.isAvailable else { return }
         backlightIndex = nil
         backlight = nil
-        deviceName = nil
-        isOnline = false
-        batteryPercent = nil
-        isCharging = false
+        backlightEffect = nil
+        fnIndex = nil
+        reprogIndex = nil
+        fnKeysAreStandard = nil
+        fKeyControls = [:]
+        divertedCIDs.removeAll()
     }
 
     // MARK: Incoming Reports
 
+    /// Events beyond battery and link changes, which `device` handles.
     private func handle(event: [UInt8]) {
-        // HID++ 1.0 device-connection notification from the receiver: byte 4 bit 6 set means the link is down.
-        if event[2] == 0x41 {
-            if event[4] & 0x40 != 0 {
-                isOnline = false
-            } else if let receiver = session?.device {
-                identify(on: receiver, enablingNotifications: false)
-            }
-            return
-        }
-        if let feature = batteryFeature, let reading = HIDPPSession.batteryReading(from: event, feature: feature) {
-            apply(reading)
+        if let index = reprogIndex, let cids = HIDPPProtocol.parseDivertedButtonsEvent(event, expectedFeatureIndex: index) {
+            handleDivertedKeys(cids)
             return
         }
         // The backlight keys change the configuration on the keyboard itself; re-read it when it says so.
@@ -202,17 +260,17 @@ extension MXMechanicalConnector: AccessoryConnector {
         setUp()
     }
 
-    /// Nothing is taken over from macOS yet, so there's nothing to hand back.
-    func stop() {}
+    /// Hands remapped keys back to macOS.
+    func stop() {
+        releaseKeys()
+    }
 
     func systemDidWake() {
-        refresh()
+        device.refresh()
     }
 
     func popoverWillShow() {
-        if monitor.isOpen || monitor.openIfPermitted() {
-            refresh()
-        }
+        device.popoverWillShow()
     }
 
     func setCardVisible(_ visible: Bool) {}
@@ -235,6 +293,48 @@ private struct MXMechanicalSettingsView: View {
         if connector.isOnline, let backlight = connector.backlight {
             backlightSection(backlight)
         }
+        if connector.isOnline, let standard = connector.fnKeysAreStandard {
+            SettingsSection(title: "Keys", footer: "When on, press Fn for the media functions printed on the keys.") {
+                Toggle("Use F1–F12 as standard function keys", isOn: Binding(
+                    get: { standard },
+                    set: { connector.setFnKeysAreStandard($0) }
+                ))
+            }
+        }
+        if connector.isOnline, connector.fKeyControls.values.contains(where: \.isDivertable) {
+            SettingsSection(title: "Key Remapping", footer: "Click a key to choose its action. Only this keyboard's keys change; the Easy-Switch keys can't be remapped. Quit Logi Options+ so it doesn't handle the same keys.") {
+                KeyRowPicker(
+                    keys: connector.fKeyControls.keys.sorted().compactMap { position in
+                        connector.fKeyControls[position].map { control in
+                            KeyCapInfo(id: position, label: "F\(position)", systemImage: Self.symbol(for: control),
+                                       isEnabled: control.isDivertable)
+                        }
+                    },
+                    action: { connector.keyActions[$0] ?? .systemDefault },
+                    onSelect: { connector.setKeyAction($1, at: $0) }
+                )
+            }
+        }
+    }
+
+    /// The symbol printed on a key, from its own function. Logitech task numbers, read from an
+    /// MX Mechanical Mini for Mac.
+    private static func symbol(for control: HIDPPProtocol.KeyControl) -> String? {
+        switch control.task {
+        case 0x00AE: return "1.circle"           // Easy-Switch 1
+        case 0x00AF: return "2.circle"
+        case 0x00B0: return "3.circle"
+        case 0x00C1: return "light.min"          // Backlight down
+        case 0x00C2: return "light.max"          // Backlight up
+        case 0x00D8: return "waveform.and.mic"   // Dictation
+        case 0x00DD: return "face.smiling"       // Emoji
+        case 0x00DF: return "camera.viewfinder"  // Screenshot
+        case 0x00F1: return "mic.slash"          // Mute microphone
+        case 0x00B1: return "magnifyingglass"    // Search
+        case 0x00FD: return "playpause"          // Play / pause
+        case 0x0003: return "speaker.slash"      // Mute
+        default: return nil
+        }
     }
 
     private func backlightSection(_ backlight: HIDPPProtocol.BacklightConfig) -> some View {
@@ -254,7 +354,7 @@ private struct MXMechanicalSettingsView: View {
                 }
                 Toggle("Automatic brightness", isOn: binding(backlight, \.isAutomaticBrightness))
                 if !backlight.isAutomaticBrightness {
-                    LevelSlider(title: "Brightness", value: Int(backlight.level), range: 1...8) { level in
+                    LevelSlider(title: "Brightness", value: Int(backlight.level), range: 1...7, commitsWhileDragging: true) { level in
                         var config = backlight
                         config.level = UInt8(level)
                         connector.setBacklight(config)

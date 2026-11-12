@@ -152,21 +152,6 @@ final class HIDPPSession {
         return reply[4]
     }
 
-    /// Lists every feature the device implements, via `IFeatureSet` (`0x0001`).
-    func enumerateFeatures() async -> [UInt16] {
-        guard let setIndex = await featureIndex(for: HIDPPProtocol.featureFeatureSet),
-              let countReply = await request(featureIndex: setIndex, function: 0x00) else { return [] }
-        var features: [UInt16] = []
-        // Index 0 is IRoot itself; the count excludes it.
-        for index in 1...max(1, Int(countReply[4])) {
-            guard let reply = await request(featureIndex: setIndex, function: 0x01, params: [UInt8(index)]) else { continue }
-            let featureID = (UInt16(reply[4]) << 8) | UInt16(reply[5])
-            features.append(featureID)
-            featureIndices[featureID] = UInt8(index)
-        }
-        return features
-    }
-
     /// Drops cached feature indices; they change if a different device is paired to the same slot.
     func reset() {
         featureIndices.removeAll()
@@ -210,12 +195,33 @@ final class HIDPPSession {
     /// Sends any prebuilt packet (HID++ 2.0 or 1.0) through the same one-at-a-time queue.
     func request(packet: [UInt8]) async -> [UInt8]? {
         let previous = queueTail
+        // A receiver's register errors don't say which register they're about, so only one register request
+        // is in flight per receiver, across every session (and HID manager) talking to it.
+        let receiver = Self.isRegisterRequest(packet) ? Self.locationID(of: device) : nil
+        let previousRegister = receiver.flatMap { Self.registerQueues[$0] }
         let task = Task<[UInt8]?, Never> {
             await previous?.value
+            await previousRegister?.value
             return await self.sendAndWait(packet: packet)
         }
         queueTail = Task { _ = await task.value }
+        if let receiver {
+            Self.registerQueues[receiver] = Task { _ = await task.value }
+        }
         return await task.value
+    }
+
+    /// The last register request queued for each receiver, by USB location.
+    private static var registerQueues: [Int: Task<Void, Never>] = [:]
+
+    /// HID++ 1.0 register reads and writes (sub-IDs 0x80–0x83).
+    private static func isRegisterRequest(_ packet: [UInt8]) -> Bool {
+        packet.count > 2 && (0x80...0x83).contains(packet[2])
+    }
+
+    /// The same for every HID manager that opens the receiver.
+    private static func locationID(of device: IOHIDDevice) -> Int {
+        IOHIDDeviceGetProperty(device, kIOHIDLocationIDKey as CFString) as? Int ?? 0
     }
 
     private func sendAndWait(packet: [UInt8]) async -> [UInt8]? {
@@ -275,8 +281,10 @@ final class HIDPPSession {
 
         guard norm[1] == deviceIndex else { return false }
 
-        // Software ID 0 marks notifications the device sends on its own.
-        if norm[2] != 0xFF, norm[2] != 0x8F, norm[3] & 0x0F == 0 {
+        // The receiver's HID++ 1.0 device connection notifications (sub-IDs 0x40 and 0x41) carry flags in byte 3,
+        // not a software ID. Otherwise software ID 0 marks notifications the device sends on its own.
+        let isConnectionNotification = norm[2] == 0x40 || norm[2] == 0x41
+        if isConnectionNotification || (norm[2] != 0xFF && norm[2] != 0x8F && norm[3] & 0x0F == 0) {
             onEvent?(norm)
         }
         return false

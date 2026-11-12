@@ -549,6 +549,17 @@ struct KeyboardBacklightTests {
         #expect(try #require(HIDPPProtocol.parseBacklightConfig(packet("11 02 0B 0E 01 09 3D 7F 00 04 06 00 06 00 06 00 00 00 00 00"))).isBatterySaving == false)
     }
 
+    @Test("Backlight info reports the current effect in byte 7, with Options+'s numbering")
+    func currentEffect() {
+        // Captured while Options+ switched effects: Random (05), then Contrast (03), then Static (00).
+        #expect(HIDPPProtocol.parseBacklightEffect(packet("11 02 0B 2C 08 04 02 05 03 00 06 00 3C 00 00 00 00 00 00 00")) == .random)
+        #expect(HIDPPProtocol.parseBacklightEffect(packet("11 02 0B 2C 08 04 02 03 03 00 06 00 3C 00 00 00 00 00 00 00")) == .contrast)
+        #expect(HIDPPProtocol.parseBacklightEffect(packet("11 02 0B 2C 08 04 02 00 03 00 06 00 3C 00 00 00 00 00 00 00")) == .staticLight)
+        #expect(HIDPPProtocol.BacklightEffect.waves.rawValue == 6)
+        #expect(HIDPPProtocol.BacklightEffect.breathing.rawValue == 2)
+        #expect(HIDPPProtocol.BacklightEffect.reaction.rawValue == 4)
+    }
+
     @Test("Editing fields sets the same option bits Options+ did, and writes all three durations")
     func editAndEncode() throws {
         var config = try #require(HIDPPProtocol.parseBacklightConfig(packet("11 02 0B 0E 01 0D 3D 7F 00 04 06 00 06 00 3C 00 00 00 00 00")))
@@ -559,5 +570,70 @@ struct KeyboardBacklightTests {
         #expect(config.options == 0x09)
         config.durationSeconds = 45
         #expect(HIDPPProtocol.setBacklightConfigParams(config) == [0x01, 0x09, 0xFF, 0x04, 0x09, 0x00, 0x09, 0x00, 0x09, 0x00])
+    }
+}
+
+// MARK: - Keyboard Keys
+
+@Suite("MX Mechanical Fn keys and remappable controls")
+struct KeyboardKeysTests {
+    private func packet(_ hex: String) -> [UInt8] {
+        hex.split(separator: " ").compactMap { UInt8($0, radix: 16) }
+    }
+
+    @Test("Fn inversion decodes per host, as Options+ toggled it")
+    func fnInversion() {
+        // Captured: host 0 with media keys (00), then standard function keys (01).
+        #expect(HIDPPProtocol.parseFnInversion(packet("11 02 0C 0D 00 00 01 01 00 00 00 00 00 00 00 00 00 00 00 00"), host: 0) == false)
+        #expect(HIDPPProtocol.parseFnInversion(packet("11 02 0C 0D 00 01 01 01 00 00 00 00 00 00 00 00 00 00 00 00"), host: 0) == true)
+        // A reply for another host isn't applied to this one.
+        #expect(HIDPPProtocol.parseFnInversion(packet("11 02 0C 0D 01 01 01 01 00 00 00 00 00 00 00 00 00 00 00 00"), host: 0) == nil)
+    }
+
+    @Test("Control info decodes F4 as the control Options+ diverted to remap it")
+    func f4ControlInfo() throws {
+        // Captured from the keyboard: control 0x00E2 at F-key position 4, divertable.
+        let control = try #require(HIDPPProtocol.parseKeyControl(packet("11 02 08 1B 00 E2 00 C1 3A 04 00 00 04 00 00 00 00 00 00 00")))
+        #expect(control.cid == 0x00E2)
+        #expect(control.task == 0x00C1)
+        #expect(control.fKeyPosition == 4)
+        #expect(control.isDivertable)
+    }
+}
+
+@Suite("G515 lighting effects and brightness")
+struct KeyboardLightingTests {
+    @Test("Effect info replies decode the keyboard's index and effect, and unknown effects are skipped")
+    func effectInfo() {
+        // Captured from a G515 LIGHTSPEED TKL: zone 0, effects 1 (Fixed), 4 (Color Wave) and 5 (Ripple, unsupported).
+        let fixed: [UInt8] = [0x11, 0xFF, 0x08, 0x0B, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
+        let wave: [UInt8] = [0x11, 0xFF, 0x08, 0x0B, 0x00, 0x04, 0x00, 0x16, 0xDC, 0xE1, 0x00, 0x1E, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
+        let ripple: [UInt8] = [0x11, 0xFF, 0x08, 0x0B, 0x00, 0x05, 0x00, 0x17, 0x00, 0x00, 0x00, 0x32, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
+        #expect(HIDPPProtocol.parseRGBZoneEffect(fixed)?.index == 1)
+        #expect(HIDPPProtocol.parseRGBZoneEffect(fixed)?.effect == .fixed)
+        #expect(HIDPPProtocol.parseRGBZoneEffect(wave)?.effect == .colorWave)
+        #expect(HIDPPProtocol.parseRGBZoneEffect(ripple)?.effect == nil)
+    }
+
+    @Test("Effect writes match the layouts the keyboard accepted")
+    func effectParams() {
+        let green = HIDPPProtocol.RGBColor(red: 0, green: 0xFF, blue: 0)
+        let fixed = HIDPPProtocol.RGBLighting(effect: .fixed, color: green, speed: 5)
+        #expect(HIDPPProtocol.setRGBEffectParams(zone: 0, index: 1, lighting: fixed)
+                == [0x00, 0x01, 0x00, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01])
+        // Speed 5: a 12 s wave, at full saturation and intensity.
+        let wave = HIDPPProtocol.RGBLighting(effect: .colorWave, color: green, speed: 5)
+        #expect(HIDPPProtocol.setRGBEffectParams(zone: 0, index: 4, lighting: wave)
+                == [0x00, 0x04, 0x00, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x2E, 0xE0, 0x64, 0x00, 0x01])
+        let breathing = HIDPPProtocol.RGBLighting(effect: .breathing, color: green, speed: 10)
+        #expect(HIDPPProtocol.setRGBEffectParams(zone: 0, index: 2, lighting: breathing)
+                == [0x00, 0x02, 0x00, 0xFF, 0x00, 0x03, 0xE8, 0x00, 0x64, 0x00, 0x00, 0x00, 0x01])
+    }
+
+    @Test("Brightness decodes from replies and brightness-key events, and encodes big-endian")
+    func brightness() {
+        let event: [UInt8] = [0x11, 0xFF, 0x0D, 0x00, 0x00, 0x32, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
+        #expect(HIDPPProtocol.parseBrightnessLevel(event) == 50)
+        #expect(HIDPPProtocol.setBrightnessParams(100) == [0x00, 0x64])
     }
 }
