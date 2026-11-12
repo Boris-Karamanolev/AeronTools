@@ -102,33 +102,60 @@ extension MXMasterManager {
         refreshDeviceState()
     }
 
-    /// Asks the device paired to the receiver who it is. Only a device that names itself an MX Master makes
-    /// the card appear; an empty or sleeping slot, or another Logitech device, leaves it hidden.
-    func identifyReceiverDevice() {
-        guard let session = identitySession else { return }
+    /// Receivers can host several devices (a Bolt receiver here also has keyboards), so the MX Master's slot is
+    /// found from the pairing records and confirmed by the mouse's own name. The known slot is checked first, so
+    /// a routine refresh is a single check; a full scan only runs when the mouse isn't where it was.
+    func identifyReceiverDevice(family: HIDPPSession.ReceiverFamily) {
+        guard let device = activeHIDDevice else { return }
         identifyTask?.cancel()
         identifyTask = Task { [weak self] in
-            let identity = await session.identify()
-            guard let self, !Task.isCancelled, self.identitySession === session else { return }
-            if let identity, identity.name.lowercased().contains("mx master") {
+            guard let self else { return }
+            let known = self.activeDeviceIndex
+            let slots = ([known] + Array(UInt8(1)...UInt8(6))).filter { (1...6).contains($0) }
+            var tried: Set<UInt8> = []
+            for slot in slots where tried.insert(slot).inserted {
+                let session = HIDPPSession(device: device, deviceIndex: slot)
+                self.identitySession = session
+                guard let paired = await session.receiverPairedDevice(family: family), paired.isPointingDevice,
+                      !Task.isCancelled, self.activeHIDDevice === device else { continue }
+                // Only an awake mouse can confirm its name; asleep, the receiver's short name has to match.
+                let identity = await session.identify()
+                guard !Task.isCancelled, self.identitySession === session else { return }
+                let name = identity?.name ?? paired.name
+                guard Self.isMXMasterName(name), identity != nil else { continue }
+
+                let slotChanged = slot != self.activeDeviceIndex || !self.isIdentified
+                self.activeDeviceIndex = slot
                 self.isIdentified = true
-                if self.snapshot.deviceName != identity.name {
-                    self.snapshot = self.snapshot.withDeviceName(identity.name)
+                if self.snapshot.deviceName != name {
+                    self.snapshot = self.snapshot.withDeviceName(name)
                 }
-            } else {
-                self.isIdentified = false
+                if slotChanged {
+                    self.featureTable.removeAll()
+                    self.probeHIDPPFeatures()
+                }
+                return
             }
+            guard !Task.isCancelled else { return }
+            self.isIdentified = false
         }
+    }
+
+    nonisolated static func isMXMasterName(_ name: String) -> Bool {
+        let lower = name.lowercased()
+        return lower.contains("mx master") || lower.contains("mx mstr")
     }
 
     /// HID++ 1.0 device-connection notification (0x41) from the receiver: byte 4 bit 6 set means the link is down.
     /// Diversions don't survive the mouse powering off, so when it comes back they're resolved and applied again.
+    /// A device in any slot connected: if it's the MX (or no MX is known yet), find and re-configure it, since
+    /// diversions don't survive the mouse powering off.
     private func handleReceiverEvent(_ event: [UInt8]) {
         guard event[2] == 0x41, event[4] & 0x40 == 0 else { return }
-        featureTable.removeAll()
+        guard !isIdentified || event[1] == activeDeviceIndex else { return }
         releaseGestureHoldIfNeeded()
-        probeHIDPPFeatures()
-        identifyReceiverDevice()
+        isIdentified = false
+        identifyReceiverDevice(family: snapshot.transport == .logiBolt ? .bolt : .unifying)
     }
 
     /// Scans IOHIDManager, IORegistry, and IOPowerSources to detect the MX Master mouse and query its telemetry.
@@ -138,41 +165,43 @@ extension MXMasterManager {
 
         if let candidate {
             let wasDisconnected = !isConnected || activeHIDDevice !== candidate.device
+            let isReceiver = candidate.transport == .logiBolt || candidate.transport == .unifying
             activeHIDDevice = candidate.device
-            activeDeviceIndex = candidate.deviceIndex
             isConnected = true
 
             if wasDisconnected {
+                // A direct link has one device; on a receiver the mouse's slot is found by scanning.
+                activeDeviceIndex = candidate.deviceIndex
                 featureTable.removeAll()
                 pressedDivertedCIDs.removeAll()
                 releaseGestureHoldIfNeeded()
-                let session = HIDPPSession(device: candidate.device, deviceIndex: candidate.deviceIndex)
-                session.onEvent = { [weak self] event in self?.handleReceiverEvent(event) }
-                identitySession = session
+                identitySession = HIDPPSession(device: candidate.device, deviceIndex: activeDeviceIndex)
                 isIdentified = false
-                if hasInputMonitoringAccess && (candidate.transport == .logiBolt || candidate.transport == .unifying) {
-                    // Lets the receiver report the mouse waking up, so diversions are re-applied without polling.
-                    Task { await session.enableReceiverConnectionNotifications() }
-                }
                 // Skip opening without access: the open would trigger a blocking TCC prompt on the main thread.
                 if hasInputMonitoringAccess {
                     let openResult = IOHIDDeviceOpen(candidate.device, IOOptionBits(kIOHIDOptionsTypeNone))
                     if openResult != kIOReturnSuccess {
                         dlog(String(format: "MX Master: IOHIDDeviceOpen returned 0x%08x", openResult))
                     }
-                    probeHIDPPFeatures()
+                    if isReceiver {
+                        // Lets the receiver report devices waking up, so the mouse is found and re-configured
+                        // without polling.
+                        let receiverSession = HIDPPSession(device: candidate.device, deviceIndex: 0xFF)
+                        Task { await receiverSession.enableReceiverConnectionNotifications() }
+                    } else {
+                        probeHIDPPFeatures()
+                    }
                 }
-            } else {
+            } else if !isReceiver || isIdentified {
                 requestBatteryFromHIDPP()
                 requestDPIFromHIDPP()
                 requestSmartShiftFromHIDPP()
             }
 
-            let isReceiver = candidate.transport == .logiBolt || candidate.transport == .unifying
             if !isReceiver {
                 isIdentified = true
             } else if hasInputMonitoringAccess {
-                identifyReceiverDevice()
+                identifyReceiverDevice(family: candidate.transport == .logiBolt ? .bolt : .unifying)
             }
 
             let resolvedName = isReceiver ? (isIdentified ? snapshot.deviceName : "MX Master") : candidate.name
@@ -276,9 +305,10 @@ extension MXMasterManager {
             let deviceIndex: UInt8
             var score = 10
 
+            // Receivers start at slot 1; `identifyReceiverDevice` then scans for the slot the MX is actually in.
             if productID == HIDPPProtocol.boltReceiverProductID {
                 transport = .logiBolt
-                deviceIndex = 0x01 // First paired slot on Logi Bolt receiver
+                deviceIndex = 0x01
                 score += 40
             } else if productID == HIDPPProtocol.unifyingReceiverProductID {
                 transport = .unifying
@@ -455,6 +485,12 @@ extension MXMasterManager {
         guard let norm = HIDPPProtocol.normalizeReport(raw), !HIDPPProtocol.isErrorResponse(norm) else {
             return
         }
+        if norm[2] == 0x41 {
+            handleReceiverEvent(norm)
+            return
+        }
+        // A receiver delivers reports from every paired device; only the MX's slot belongs to this code.
+        guard norm[1] == activeDeviceIndex else { return }
 
         let featureIndex = norm[2]
         let swID = norm[3] & 0x0F

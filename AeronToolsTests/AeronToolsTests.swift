@@ -415,6 +415,56 @@ struct LogitechGProtocolTests {
         #expect(HIDPPProtocol.buttonMap(buttonCount: 5, silencing: [4, 5]) == [1, 2, 3, 0, 0])
     }
 
+    /// Profile sector 0x0001 captured from a PRO X2 SUPERSTRIKE (factory settings), 255 bytes.
+    private var capturedProfile: [UInt8] {
+        packet("03 03 00 00 20 03 20 03 02 B0 04 B0 04 02 40 06 40 06 02 60 09 60 09 02 80 0C 80 0C 02 00 00 00 00 FF 00 FF FF FF 14 08 0C 14 08 0C 3C 00 2C 01 80 01 00 01 80 01 00 02 80 01 00 04 80 01 00 08 80 01 00 10 FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF 03 00 00 00 00 00 1F 40 00 00 00 03 00 00 00 00 00 1F 40 00 00 00 03 00 00 00 00 00 1F 40 32 00 00 03 00 00 00 00 00 1F 40 32 00 00 03 2A 38")
+    }
+
+    @Test("The captured profile's stored CRC verifies, and the directory points at sector 1")
+    func profileChecksumAndDirectory() {
+        #expect(capturedProfile.count == 255)
+        #expect(HIDPPProtocol.hasValidCRC(sector: capturedProfile))
+        let directory = packet("00 01 01 FF 00 02 00 FF 00 03 00 FF 00 04 00 FF 00 05 00 FF FF FF FF FF")
+        #expect(HIDPPProtocol.firstEnabledProfileSector(directory: directory) == 0x0001)
+        #expect(HIDPPProtocol.firstEnabledProfileSector(directory: packet("00 02 00 FF FF FF FF FF")) == nil)
+        let info = packet("11 01 0E 0C 01 08 01 05 01 05 10 00 FF 0A 04 00 00 00 00 00")
+        #expect(HIDPPProtocol.parseOnboardProfilesInfo(info) == .init(profileFormat: 8, sectorSize: 255))
+    }
+
+    @Test("Patching changes only DPI, report rate and trigger bytes, and keeps the CRC valid")
+    func profilePatching() throws {
+        let original = capturedProfile
+        let settings = HIDPPProtocol.ProfileSettings(
+            dpi: 1600, reportRateHz: 2000, triggers: .init(actuation: 3, rapidTrigger: 2, haptics: 0)
+        )
+        let patched = try #require(HIDPPProtocol.patchedProfileSector(original, with: settings))
+        #expect(HIDPPProtocol.hasValidCRC(sector: patched))
+        // Default DPI level 0 (offset 4): 1600 = 0x0640, little-endian X and Y; lift-off kept.
+        #expect(Array(patched[4...8]) == [0x40, 0x06, 0x40, 0x06, original[8]])
+        #expect(Array(patched[0...1]) == [4, 4])
+        #expect(Array(patched[38...43]) == [0x0C, 0x09, 0x00, 0x0C, 0x09, 0x00])
+        let changed = Set((0..<255).filter { patched[$0] != original[$0] })
+        #expect(changed.isSubset(of: [0, 1, 4, 5, 6, 7, 38, 39, 40, 41, 42, 43, 253, 254]))
+
+        // Writing the current values changes nothing at all.
+        let same = HIDPPProtocol.ProfileSettings(dpi: 800, reportRateHz: 1000, triggers: .profileDefault)
+        #expect(HIDPPProtocol.patchedProfileSector(original, with: same) == original)
+
+        // A sector whose CRC doesn't verify is never patched.
+        var corrupt = original
+        corrupt[100] ^= 0xFF
+        #expect(HIDPPProtocol.patchedProfileSector(corrupt, with: settings) == nil)
+    }
+
+    @Test("A 255-byte sector reads as 16 chunks, the last one overlapping")
+    func sectorAssembly() throws {
+        let offsets = HIDPPProtocol.sectorReadOffsets(sectorSize: 255)
+        #expect(offsets.count == 16)
+        #expect(offsets.last == 239)
+        let chunks = offsets.map { Array(capturedProfile[$0..<($0 + 16)]) }
+        #expect(try #require(HIDPPProtocol.assembleSector(chunks, sectorSize: 255)) == capturedProfile)
+    }
+
     @Test("Spy events decode the pressed-button mask; replies are ignored")
     func buttonSpyEvents() throws {
         // Captured left-button press and release.
@@ -427,5 +477,87 @@ struct LogitechGProtocolTests {
         // G HUB's startSpy reply (function 1) is not a press event.
         let reply = packet("11 01 0F 1C 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00")
         #expect(HIDPPProtocol.parseButtonSpyEvent(reply, expectedFeatureIndex: 0x0F) == nil)
+    }
+}
+
+// MARK: - Receiver Pairing Records
+
+@Suite("Receiver pairing records and device names")
+struct ReceiverPairingTests {
+    private func packet(_ hex: String) -> [UInt8] {
+        hex.split(separator: " ").compactMap { UInt8($0, radix: 16) }
+    }
+
+    @Test("Bolt pairing records decode kind and the receiver's short name")
+    func boltPairing() throws {
+        // Captured from a Logi Bolt receiver: slot 2 pairing info and name ("MX MCHNCL M").
+        let info = packet("11 FF 83 B5 52 01 6D B3 8C 48 7B 70 01 00 01 14 01 00 00 00")
+        let name = packet("11 FF 83 B5 62 01 0B 4D 58 20 4D 43 48 4E 43 4C 20 4D 00 00")
+        let paired = try #require(HIDPPSession.pairedDevice(kindByte: info[5], name: name, lengthAt: 6))
+        #expect(paired.name == "MX MCHNCL M")
+        #expect(paired.kind == .keyboard)
+        #expect(!paired.isPointingDevice)
+        #expect(MXMechanicalConnector.isMXMechanical(paired.name))
+        #expect(!MXMasterManager.isMXMasterName(paired.name))
+    }
+
+    @Test("LIGHTSPEED pairing records decode a mouse and its name")
+    func lightspeedPairing() throws {
+        // Captured from a LIGHTSPEED receiver: slot 1 pairing info and name ("X2 SUPERSTRIKE").
+        let info = packet("11 FF 83 B5 20 08 08 40 BD 11 00 02 B1 01 00 00 7F 24 00 00")
+        let name = packet("11 FF 83 B5 40 0E 58 32 20 53 55 50 45 52 53 54 52 49 4B 45")
+        let paired = try #require(HIDPPSession.pairedDevice(kindByte: info[4 + 7], name: name, lengthAt: 5))
+        #expect(paired.name == "X2 SUPERSTRIKE")
+        #expect(paired.isPointingDevice)
+    }
+
+    @Test("Device names are matched to the right connector")
+    func nameMatching() {
+        #expect(MXMasterManager.isMXMasterName("MX Master 4"))
+        #expect(MXMasterManager.isMXMasterName("MX Master 3S for Mac"))
+        #expect(!MXMasterManager.isMXMasterName("MX Keys Mini"))
+        #expect(MXMechanicalConnector.isMXMechanical("MX Mechanical Mini for Mac"))
+        #expect(!MXMechanicalConnector.isMXMechanical("MX Keys Mini"))
+    }
+}
+
+// MARK: - Keyboard Backlight
+
+@Suite("MX Mechanical backlight configuration")
+struct KeyboardBacklightTests {
+    private func packet(_ hex: String) -> [UInt8] {
+        hex.split(separator: " ").compactMap { UInt8($0, radix: 16) }
+    }
+
+    @Test("Captured replies decode on/off, mode, battery saving, level and durations")
+    func decodeCapturedConfigs() throws {
+        // Options+ defaults: on, automatic brightness, battery saving, level 4, 30 s / 30 s / 5 min.
+        let defaults = try #require(HIDPPProtocol.parseBacklightConfig(packet("11 02 0B 0E 01 0D 3D 7F 00 04 06 00 06 00 3C 00 00 00 00 00")))
+        #expect(defaults.isEnabled)
+        #expect(defaults.isAutomaticBrightness)
+        #expect(defaults.isBatterySaving)
+        #expect(defaults.level == 4)
+        #expect(defaults.durationSeconds == 30)
+        #expect(defaults.durationCharging == 60)
+        #expect(defaults.effects == 0x007F)
+
+        // Backlighting off.
+        #expect(try #require(HIDPPProtocol.parseBacklightConfig(packet("11 02 0B 0E 00 0D 3D 7F 00 00 06 00 06 00 3C 00 00 00 00 00"))).isEnabled == false)
+        // Automatic brightness off (manual level).
+        #expect(try #require(HIDPPProtocol.parseBacklightConfig(packet("11 02 0B 0E 01 1D 3D 7F 00 02 06 00 06 00 06 00 00 00 00 00"))).isAutomaticBrightness == false)
+        // Battery saving off.
+        #expect(try #require(HIDPPProtocol.parseBacklightConfig(packet("11 02 0B 0E 01 09 3D 7F 00 04 06 00 06 00 06 00 00 00 00 00"))).isBatterySaving == false)
+    }
+
+    @Test("Editing fields sets the same option bits Options+ did, and writes all three durations")
+    func editAndEncode() throws {
+        var config = try #require(HIDPPProtocol.parseBacklightConfig(packet("11 02 0B 0E 01 0D 3D 7F 00 04 06 00 06 00 3C 00 00 00 00 00")))
+        config.isAutomaticBrightness = false
+        #expect(config.options == 0x1D)
+        config.isAutomaticBrightness = true
+        config.isBatterySaving = false
+        #expect(config.options == 0x09)
+        config.durationSeconds = 45
+        #expect(HIDPPProtocol.setBacklightConfigParams(config) == [0x01, 0x09, 0xFF, 0x04, 0x09, 0x00, 0x09, 0x00, 0x09, 0x00])
     }
 }

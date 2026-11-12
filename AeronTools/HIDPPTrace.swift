@@ -9,7 +9,9 @@ import Foundation
 /// Off unless enabled: `defaults write com.aeronlabs.aerontools hidppTrace -bool YES`
 /// Output: /tmp/aeron-hidpp-trace.log
 enum HIDPPTrace {
-    private static let isEnabled = UserDefaults.standard.bool(forKey: "hidppTrace")
+    /// While tracing, connectors stay passive (they identify devices but never take control or write settings),
+    /// so the software being traced isn't fought or overwritten.
+    static let isEnabled = UserDefaults.standard.bool(forKey: "hidppTrace")
     private static let url = URL(fileURLWithPath: "/tmp/aeron-hidpp-trace.log")
 
     static func record(_ report: [UInt8]) {

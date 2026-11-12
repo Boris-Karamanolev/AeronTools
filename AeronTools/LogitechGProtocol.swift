@@ -204,6 +204,121 @@ nonisolated extension HIDPPProtocol {
 
     // MARK: Onboard Profiles (0x8100)
 
+    /// The profile format whose layout is mapped below (read from a PRO X2 SUPERSTRIKE). Writes are refused
+    /// for any other format, so an unknown layout is never overwritten.
+    static let supportedProfileFormat: UInt8 = 0x08
+
+    struct OnboardProfilesInfo: Equatable, Sendable {
+        let profileFormat: UInt8
+        let sectorSize: Int
+    }
+
+    /// `getOnboardProfilesInfo` (function 0): [5] profile format, [11…12] sector size.
+    static func parseOnboardProfilesInfo(_ reply: [UInt8]) -> OnboardProfilesInfo? {
+        guard reply.count >= 13 else { return nil }
+        let size = (Int(reply[11]) << 8) | Int(reply[12])
+        return size > 16 ? OnboardProfilesInfo(profileFormat: reply[5], sectorSize: size) : nil
+    }
+
+    /// The first enabled profile's sector, from the directory in sector 0: 4-byte entries of
+    /// [sector hi, sector lo, enabled, 0xFF], ended by 0xFFFF.
+    static func firstEnabledProfileSector(directory: [UInt8]) -> UInt16? {
+        stride(from: 0, to: directory.count - 3, by: 4).lazy.compactMap { offset -> UInt16?? in
+            let sector = (UInt16(directory[offset]) << 8) | UInt16(directory[offset + 1])
+            if sector == 0xFFFF { return .some(nil) }
+            return directory[offset + 2] != 0 ? .some(sector) : nil
+        }.first ?? nil
+    }
+
+    /// CRC-16/CCITT (poly 0x1021, init 0xFFFF): the last two bytes of every profile sector, big-endian.
+    /// Verified against the checksum stored in a captured sector.
+    static func profileCRC(_ bytes: ArraySlice<UInt8>) -> UInt16 {
+        var crc: UInt16 = 0xFFFF
+        for byte in bytes {
+            crc ^= UInt16(byte) << 8
+            for _ in 0..<8 {
+                crc = crc & 0x8000 != 0 ? (crc << 1) ^ 0x1021 : crc << 1
+            }
+        }
+        return crc
+    }
+
+    static func hasValidCRC(sector: [UInt8]) -> Bool {
+        guard sector.count > 2 else { return false }
+        let stored = (UInt16(sector[sector.count - 2]) << 8) | UInt16(sector[sector.count - 1])
+        return profileCRC(sector[..<(sector.count - 2)]) == stored
+    }
+
+    /// The settings the app keeps in a format-8 profile sector.
+    struct ProfileSettings: Equatable, Sendable {
+        var dpi: Int?
+        var reportRateHz: Int?
+        var triggers: TriggerSettings?
+    }
+
+    /// A copy of a format-8 profile sector with only these fields replaced, and its CRC recomputed:
+    /// [0…1] report rate index, [2] default DPI level, [4 + 5·level …] DPI X/Y (little-endian) and lift-off,
+    /// [38…43] triggers for both keys. Every other byte is kept exactly.
+    static func patchedProfileSector(_ sector: [UInt8], with settings: ProfileSettings) -> [UInt8]? {
+        guard sector.count >= 64, hasValidCRC(sector: sector) else { return nil }
+        var patched = sector
+        if let hz = settings.reportRateHz, let index = reportRateIndex(forHz: hz) {
+            patched[0] = index
+            patched[1] = index
+        }
+        if let dpi = settings.dpi {
+            let level = Int(patched[2])
+            guard level < 5 else { return nil }
+            let offset = 4 + level * 5
+            let value = UInt16(clamping: dpi)
+            patched[offset] = UInt8(value & 0xFF)
+            patched[offset + 1] = UInt8(value >> 8)
+            patched[offset + 2] = UInt8(value & 0xFF)
+            patched[offset + 3] = UInt8(value >> 8)
+        }
+        if let triggers = settings.triggers {
+            for (key, base) in [(UInt8(0), 38), (UInt8(1), 41)] {
+                let params = setTriggerParams(key: key, triggers)
+                patched[base] = params[1]
+                patched[base + 1] = params[2]
+                patched[base + 2] = params[3]
+            }
+        }
+        let crc = profileCRC(patched[..<(patched.count - 2)])
+        patched[patched.count - 2] = UInt8(crc >> 8)
+        patched[patched.count - 1] = UInt8(crc & 0xFF)
+        return patched
+    }
+
+    /// `readMemory` (function 5) parameters: sector and byte offset. Each read returns 16 bytes.
+    static func readMemoryParams(sector: UInt16, offset: Int) -> [UInt8] {
+        [UInt8(sector >> 8), UInt8(sector & 0xFF), UInt8(offset >> 8), UInt8(offset & 0xFF)]
+    }
+
+    /// Offsets to read a whole sector 16 bytes at a time; the last read is moved back so it ends at the
+    /// sector's end (reads can't run past it), overlapping the previous one.
+    static func sectorReadOffsets(sectorSize: Int) -> [Int] {
+        var offsets = Array(stride(from: 0, to: sectorSize - 16, by: 16))
+        offsets.append(sectorSize - 16)
+        return offsets
+    }
+
+    /// Assembles a sector from reads at `sectorReadOffsets`.
+    static func assembleSector(_ chunks: [[UInt8]], sectorSize: Int) -> [UInt8]? {
+        let offsets = sectorReadOffsets(sectorSize: sectorSize)
+        guard chunks.count == offsets.count, chunks.allSatisfy({ $0.count >= 16 }) else { return nil }
+        var sector = [UInt8](repeating: 0, count: sectorSize)
+        for (offset, chunk) in zip(offsets, chunks) {
+            sector.replaceSubrange(offset..<(offset + 16), with: chunk.prefix(16))
+        }
+        return sector
+    }
+
+    /// `memoryAddrWrite` (function 6) parameters: sector, offset and length of the write that follows.
+    static func writeMemoryStartParams(sector: UInt16, length: Int) -> [UInt8] {
+        [UInt8(sector >> 8), UInt8(sector & 0xFF), 0x00, 0x00, UInt8(length >> 8), UInt8(length & 0xFF)]
+    }
+
     enum OnboardMode: UInt8, Sendable {
         /// The mouse runs from a profile stored on it; DPI and report rate changes are refused.
         case onboard = 0x01

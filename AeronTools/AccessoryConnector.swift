@@ -77,6 +77,7 @@ enum AccessoryRegistry {
     static let connectors: [any AccessoryConnector] = [
         MXMasterManager.shared,
         LogitechGConnector.shared,
+        MXMechanicalConnector.shared,
     ]
 
     static var available: [any AccessoryConnector] {

@@ -80,25 +80,52 @@ final class HIDPPSession {
 
     // MARK: Receiver (HID++ 1.0)
 
+    /// Receiver generations keep their pairing records in different registers.
+    enum ReceiverFamily {
+        /// Unifying and LIGHTSPEED: pairing info at 0x20 + slot − 1, name at 0x40 + slot − 1.
+        case unifying
+        /// Logi Bolt: pairing info at 0x50 + slot, name at 0x60 + slot (read with page 1).
+        case bolt
+    }
+
+    /// HID++ 1.0 device kinds from the pairing record.
+    enum PairedKind: UInt8 {
+        case keyboard = 0x01, mouse, numpad, presenter
+        case remoteControl = 0x07, trackball, touchpad
+        case unknown = 0xFF
+    }
+
     struct PairedDevice: Equatable {
         let name: String
-        let isPointingDevice: Bool
+        let kind: PairedKind
+
+        var isPointingDevice: Bool { kind == .mouse || kind == .trackball || kind == .touchpad }
     }
 
     /// Reads the receiver's pairing records for this session's slot. Unlike `identify()`, this works while the
     /// device is asleep, because the receiver answers for it. Returns nil if nothing is paired in the slot.
-    func receiverPairedDevice() async -> PairedDevice? {
-        let slotOffset = deviceIndex &- 1
-        guard let info = await request(packet: Self.receiverRegisterRead(sub: 0x20 &+ slotOffset)),
-              let nameReply = await request(packet: Self.receiverRegisterRead(sub: 0x40 &+ slotOffset)) else { return nil }
+    func receiverPairedDevice(family: ReceiverFamily = .unifying) async -> PairedDevice? {
+        switch family {
+        case .unifying:
+            let slotOffset = deviceIndex &- 1
+            guard let info = await request(packet: Self.receiverRegisterRead(sub: 0x20 &+ slotOffset)),
+                  let nameReply = await request(packet: Self.receiverRegisterRead(sub: 0x40 &+ slotOffset)) else { return nil }
+            // Pairing info: [sub, destination, interval, wpid hi, wpid lo, …, kind at +7]; name: [sub, length, chars…].
+            return Self.pairedDevice(kindByte: info[4 + 7], name: nameReply, lengthAt: 5)
+        case .bolt:
+            guard let info = await request(packet: Self.receiverRegisterRead(sub: 0x50 &+ deviceIndex)),
+                  let nameReply = await request(packet: Self.receiverRegisterRead(sub: 0x60 &+ deviceIndex, page: 0x01)) else { return nil }
+            // Pairing info: [sub, kind, …]; name: [sub, page, length, chars…].
+            return Self.pairedDevice(kindByte: info[4 + 1], name: nameReply, lengthAt: 6)
+        }
+    }
 
-        // Pairing info: [.., sub, destination, interval, wpid hi, wpid lo, .., .., kind, ..]; kind 2 = mouse,
-        // 8 = trackball, 9 = touchpad.
-        let kind = info[4 + 7] & 0x0F
-        let length = min(Int(nameReply[5]), nameReply.count - 6)
+    /// Builds a pairing record from the kind byte and a name reply whose length byte sits at `lengthAt`.
+    nonisolated static func pairedDevice(kindByte: UInt8, name reply: [UInt8], lengthAt index: Int) -> PairedDevice? {
+        let length = min(Int(reply[index]), reply.count - index - 1)
         guard length > 0 else { return nil }
-        let name = String(decoding: nameReply[6..<(6 + length)], as: UTF8.self)
-        return PairedDevice(name: name, isPointingDevice: [0x02, 0x08, 0x09].contains(kind))
+        let name = String(decoding: reply[(index + 1)..<(index + 1 + length)], as: UTF8.self)
+        return PairedDevice(name: name, kind: PairedKind(rawValue: kindByte & 0x0F) ?? .unknown)
     }
 
     /// Asks the receiver to report when its devices connect or disconnect (HID++ 1.0 notification 0x41),
@@ -108,8 +135,8 @@ final class HIDPPSession {
         _ = await request(packet: [HIDPPProtocol.shortReportID, 0xFF, 0x80, 0x00, 0x00, 0x01, 0x00])
     }
 
-    private static func receiverRegisterRead(sub: UInt8) -> [UInt8] {
-        [HIDPPProtocol.shortReportID, 0xFF, HIDPPProtocol.readLongRegister, 0xB5, sub, 0x00, 0x00]
+    private static func receiverRegisterRead(sub: UInt8, page: UInt8 = 0x00) -> [UInt8] {
+        [HIDPPProtocol.shortReportID, 0xFF, HIDPPProtocol.readLongRegister, 0xB5, sub, page, 0x00]
     }
 
     // MARK: Features

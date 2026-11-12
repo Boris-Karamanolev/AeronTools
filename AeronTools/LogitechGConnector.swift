@@ -42,16 +42,31 @@ final class LogitechGConnector {
     /// Side button actions. Nil until the mouse is controllable and reports Mouse Button Spy.
     private(set) var sideButtons: SideButtons?
 
+    /// Save DPI, report rate and triggers into the mouse's first onboard profile, so it keeps them without the app.
+    var savesToOnboardProfile: Bool = UserDefaults.standard.object(forKey: "logitechG.saveToOnboardProfile") as? Bool ?? true {
+        didSet {
+            UserDefaults.standard.set(savesToOnboardProfile, forKey: "logitechG.saveToOnboardProfile")
+            if savesToOnboardProfile { scheduleProfileSave() }
+        }
+    }
+    private(set) var profileSaveState: ProfileSaveState = .idle
+
+    enum ProfileSaveState: Equatable {
+        case idle
+        case saving
+        case saved(profile: Int)
+        case failed(String)
+    }
+
     struct SideButtons: Codable, Equatable {
         var back: AccessoryButtonAction = .systemDefault
         var forward: AccessoryButtonAction = .systemDefault
     }
 
-    @ObservationIgnored private var hidManager: IOHIDManager?
-    @ObservationIgnored private var isManagerOpen = false
+    @ObservationIgnored private let monitor = HIDPPReceiverMonitor(productIDs: lightspeedReceiverIDs)
     @ObservationIgnored private var session: HIDPPSession?
     @ObservationIgnored private var identifyTask: Task<Void, Never>?
-    @ObservationIgnored private var batteryFeature: (index: UInt8, isUnified: Bool)?
+    @ObservationIgnored private var batteryFeature: HIDPPSession.BatteryFeature?
     @ObservationIgnored private var dpiFeatureIndex: UInt8?
     @ObservationIgnored private var reportRateFeatureIndex: UInt8?
     @ObservationIgnored private var onboardFeatureIndex: UInt8?
@@ -61,6 +76,7 @@ final class LogitechGConnector {
     /// Press reporting is on and remapped side buttons are silenced to macOS.
     @ObservationIgnored private var isSpying = false
     @ObservationIgnored private var lastButtonMask: UInt16 = 0
+    @ObservationIgnored private var profileSaveTask: Task<Void, Never>?
     @ObservationIgnored private var isInHostMode = false
     @ObservationIgnored private var liftOffDistance: UInt8 = 0
 
@@ -69,57 +85,9 @@ final class LogitechGConnector {
     // MARK: Lifecycle
 
     fileprivate func setUp() {
-        guard hidManager == nil else { return }
-        let manager = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
-        // Only the receivers' HID++ interface (vendor page 0xFF00), never their pointer interface,
-        // so mouse movement is never delivered to this app.
-        let matches: [[String: Any]] = Self.lightspeedReceiverIDs.map { productID in
-            [
-                kIOHIDVendorIDKey as String: HIDPPProtocol.logitechVendorID,
-                kIOHIDProductIDKey as String: productID,
-                kIOHIDDeviceUsagePageKey as String: 0xFF00
-            ]
-        }
-        IOHIDManagerSetDeviceMatchingMultiple(manager, matches as CFArray)
-
-        let context = Unmanaged.passUnretained(self).toOpaque()
-        IOHIDManagerRegisterDeviceMatchingCallback(manager, { context, _, _, _ in
-            guard let context else { return }
-            let connector = Unmanaged<LogitechGConnector>.fromOpaque(context).takeUnretainedValue()
-            MainActor.assumeIsolated { connector.refresh() }
-        }, context)
-        IOHIDManagerRegisterDeviceRemovalCallback(manager, { context, _, _, _ in
-            guard let context else { return }
-            let connector = Unmanaged<LogitechGConnector>.fromOpaque(context).takeUnretainedValue()
-            MainActor.assumeIsolated { connector.refresh() }
-        }, context)
-        IOHIDManagerRegisterInputReportCallback(manager, { context, _, sender, _, reportID, report, length in
-            guard let context, let sender, length > 0,
-                  reportID == HIDPPProtocol.shortReportID || reportID == HIDPPProtocol.longReportID else { return }
-            var bytes = Array(UnsafeBufferPointer(start: report, count: length))
-            if bytes.first != UInt8(reportID) {
-                bytes.insert(UInt8(reportID), at: 0)
-            }
-            let device = Unmanaged<IOHIDDevice>.fromOpaque(sender).takeUnretainedValue()
-            let connector = Unmanaged<LogitechGConnector>.fromOpaque(context).takeUnretainedValue()
-            MainActor.assumeIsolated { connector.handle(report: bytes, from: device) }
-        }, context)
-
-        // The input-report callbacks run on the main run loop, which is why they can assume main-actor isolation.
-        IOHIDManagerScheduleWithRunLoop(manager, CFRunLoopGetMain(), CFRunLoopMode.commonModes.rawValue)
-        hidManager = manager
-        openIfPermitted()
-    }
-
-    /// Opening without Input Monitoring would show a blocking permission prompt, so wait until it's granted.
-    /// The MX Master connector requests the permission; this one picks up the grant when the popover opens.
-    private func openIfPermitted() {
-        guard let hidManager, InputMonitoringPermission.isGranted, !isManagerOpen else { return }
-        let result = IOHIDManagerOpen(hidManager, IOOptionBits(kIOHIDOptionsTypeNone))
-        isManagerOpen = result == kIOReturnSuccess
-        if !isManagerOpen {
-            dlog(String(format: "Logitech G: IOHIDManagerOpen returned 0x%08x", result))
-        }
+        monitor.onReceiversChanged = { [weak self] in self?.refresh() }
+        monitor.onReport = { [weak self] report, device in self?.handle(report: report, from: device) }
+        monitor.start()
         refresh()
     }
 
@@ -127,9 +95,7 @@ final class LogitechGConnector {
 
     /// Re-reads which receiver is attached and asks the mouse on it who it is.
     fileprivate func refresh() {
-        guard isManagerOpen,
-              let devices = hidManager.flatMap({ IOHIDManagerCopyDevices($0) as? Set<IOHIDDevice> }),
-              let receiver = devices.first else {
+        guard let receiver = monitor.receivers.first else {
             clearDevice()
             return
         }
@@ -171,6 +137,9 @@ final class LogitechGConnector {
             self.deviceName = identity.name
             await self.loadBattery(using: session)
             // Also runs after every reconnect: the mouse drops back to its onboard profile when it powers off.
+            #if DEBUG
+            if HIDPPTrace.isEnabled { return }
+            #endif
             await self.takeControl(using: session)
         }
     }
@@ -240,6 +209,7 @@ final class LogitechGConnector {
         if spyFeatureIndex != nil, buttonCount >= HIDPPProtocol.forwardSideButton {
             setSideButtons(savedSideButtons ?? SideButtons())
         }
+        scheduleProfileSave()
         if let saved = savedSetting("dpi"), saved != dpi {
             setDPI(saved)
         }
@@ -260,6 +230,7 @@ final class LogitechGConnector {
             )
             guard let self, self.session === session, reply != nil else { return }
             self.dpi = value
+            self.scheduleProfileSave()
         }
     }
 
@@ -272,6 +243,7 @@ final class LogitechGConnector {
             let reply = await session.request(featureIndex: index, function: 0x03, params: [rateIndex])
             guard let self, self.session === session, reply != nil else { return }
             self.reportRateHz = hz
+            self.scheduleProfileSave()
         }
     }
 
@@ -298,6 +270,7 @@ final class LogitechGConnector {
             }
             guard let self, self.session === session, applied else { return }
             self.triggerSettings = settings
+            self.scheduleProfileSave()
         }
     }
 
@@ -313,6 +286,97 @@ final class LogitechGConnector {
               var legacy = try? decoder.decode(HIDPPProtocol.TriggerSettings.self, from: data) else { return nil }
         legacy.rapidTrigger = 0
         return legacy
+    }
+
+    // MARK: Onboard Profile
+
+    /// Saves a few seconds after the last change, so adjusting a slider writes the mouse's memory once.
+    private func scheduleProfileSave() {
+        guard savesToOnboardProfile, canControlPerformance, onboardFeatureIndex != nil else { return }
+        profileSaveTask?.cancel()
+        profileSaveTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(3))
+            guard !Task.isCancelled, let self else { return }
+            await self.saveToOnboardProfile()
+        }
+    }
+
+    /// Writes DPI, report rate and triggers into the first onboard profile. Only those bytes change; the sector
+    /// must verify before it's touched, is read back after writing, and is restored if the read-back differs.
+    private func saveToOnboardProfile() async {
+        guard let session, let index = onboardFeatureIndex else { return }
+        profileSaveState = .saving
+
+        guard let infoReply = await session.request(featureIndex: index, function: 0x00),
+              let info = HIDPPProtocol.parseOnboardProfilesInfo(infoReply),
+              info.profileFormat == HIDPPProtocol.supportedProfileFormat else {
+            profileSaveState = .failed("This mouse's profile format isn't supported.")
+            return
+        }
+
+        var directory: [UInt8] = []
+        for offset in [0, 16] {
+            guard let reply = await session.request(
+                featureIndex: index, function: 0x05, params: HIDPPProtocol.readMemoryParams(sector: 0, offset: offset)
+            ) else {
+                profileSaveState = .failed("Couldn't read the mouse's profile list.")
+                return
+            }
+            directory += reply[4..<20]
+        }
+        guard let sector = HIDPPProtocol.firstEnabledProfileSector(directory: directory) else {
+            profileSaveState = .failed("The mouse has no enabled onboard profile.")
+            return
+        }
+
+        guard let original = await readSector(sector, size: info.sectorSize, session: session, index: index) else {
+            profileSaveState = .failed("Couldn't read the onboard profile.")
+            return
+        }
+        let settings = HIDPPProtocol.ProfileSettings(dpi: dpi, reportRateHz: reportRateHz, triggers: triggerSettings)
+        guard let patched = HIDPPProtocol.patchedProfileSector(original, with: settings) else {
+            profileSaveState = .failed("The onboard profile didn't pass its checksum, so it was left untouched.")
+            return
+        }
+
+        let profile = Int(sector)
+        guard patched != original else {
+            profileSaveState = .saved(profile: profile)
+            return
+        }
+
+        if await writeSector(sector, patched, session: session, index: index),
+           await readSector(sector, size: info.sectorSize, session: session, index: index) == patched {
+            profileSaveState = .saved(profile: profile)
+        } else {
+            // Put the original back so the mouse never keeps a half-written profile.
+            _ = await writeSector(sector, original, session: session, index: index)
+            profileSaveState = .failed("Saving to the mouse didn't verify, so its profile was restored.")
+            dlog("Logitech G: onboard profile write failed verification; original restored")
+        }
+    }
+
+    private func readSector(_ sector: UInt16, size: Int, session: HIDPPSession, index: UInt8) async -> [UInt8]? {
+        var chunks: [[UInt8]] = []
+        for offset in HIDPPProtocol.sectorReadOffsets(sectorSize: size) {
+            guard let reply = await session.request(
+                featureIndex: index, function: 0x05, params: HIDPPProtocol.readMemoryParams(sector: sector, offset: offset)
+            ) else { return nil }
+            chunks.append(Array(reply[4..<20]))
+        }
+        return HIDPPProtocol.assembleSector(chunks, sectorSize: size)
+    }
+
+    /// memoryAddrWrite (6), then the data 16 bytes at a time (7), then memoryWriteEnd (8).
+    private func writeSector(_ sector: UInt16, _ data: [UInt8], session: HIDPPSession, index: UInt8) async -> Bool {
+        guard await session.request(
+            featureIndex: index, function: 0x06, params: HIDPPProtocol.writeMemoryStartParams(sector: sector, length: data.count)
+        ) != nil else { return false }
+        for offset in stride(from: 0, to: data.count, by: 16) {
+            let chunk = Array(data[offset..<min(offset + 16, data.count)])
+            guard await session.request(featureIndex: index, function: 0x07, params: chunk) != nil else { return false }
+        }
+        return await session.request(featureIndex: index, function: 0x08) != nil
     }
 
     // MARK: Side Buttons
@@ -405,25 +469,13 @@ final class LogitechGConnector {
     }
 
     private func loadBattery(using session: HIDPPSession) async {
-        if let index = await session.featureIndex(for: HIDPPProtocol.featureUnifiedBattery) {
-            batteryFeature = (index, true)
-            // UnifiedBattery.getStatus is function 1.
-            if let reply = await session.request(featureIndex: index, function: 0x01) {
-                apply(batteryReply: reply)
-            }
-        } else if let index = await session.featureIndex(for: HIDPPProtocol.featureBatteryStatus) {
-            batteryFeature = (index, false)
-            if let reply = await session.request(featureIndex: index, function: 0x00) {
-                apply(batteryReply: reply)
-            }
+        batteryFeature = await session.batteryFeature()
+        if let feature = batteryFeature, let reading = await session.readBattery(feature) {
+            apply(reading)
         }
     }
 
-    private func apply(batteryReply: [UInt8]) {
-        guard let feature = batteryFeature,
-              let reading = HIDPPProtocol.parseBatteryReply(
-                  batteryReply, expectedFeatureIndex: feature.index, isUnifiedBattery: feature.isUnified
-              ) else { return }
+    private func apply(_ reading: HIDPPProtocol.BatteryReading) {
         if batteryPercent != reading.percentage { batteryPercent = reading.percentage }
         if isCharging != reading.isCharging { isCharging = reading.isCharging }
         AccessoryBatteryAlerts.shared.report(id: id, name: accessoryName, percent: batteryPercent, isCharging: isCharging)
@@ -463,9 +515,6 @@ final class LogitechGConnector {
 
     private func handle(report: [UInt8], from device: IOHIDDevice) {
         guard let session, session.device === device else { return }
-        #if DEBUG
-        HIDPPTrace.record(report)
-        #endif
         session.handle(report: report)
     }
 
@@ -491,8 +540,8 @@ final class LogitechGConnector {
             return
         }
         // Battery changes the mouse pushes on its own (same layout as the getStatus reply).
-        if let feature = batteryFeature, event[2] == feature.index {
-            apply(batteryReply: event)
+        if let feature = batteryFeature, let reading = HIDPPSession.batteryReading(from: event, feature: feature) {
+            apply(reading)
         }
     }
 }
@@ -501,7 +550,7 @@ final class LogitechGConnector {
 
 extension LogitechGConnector: AccessoryConnector {
     var id: String { "logitech.g-mouse" }
-    var displayName: String { "Logitech G" }
+    var displayName: String { "G2 Superstrike" }
     var systemImage: String { "computermouse" }
 
     var isAvailable: Bool { deviceName != nil }
@@ -525,10 +574,8 @@ extension LogitechGConnector: AccessoryConnector {
 
     func popoverWillShow() {
         // Picks up an Input Monitoring grant made in System Settings, then re-identifies the mouse once.
-        if isManagerOpen {
+        if monitor.isOpen || monitor.openIfPermitted() {
             refresh()
-        } else {
-            openIfPermitted()
         }
     }
 
@@ -563,6 +610,9 @@ private struct LogitechGSettingsView: View {
             }
             if connector.isOnline, let buttons = connector.sideButtons {
                 sideButtonSection(buttons)
+            }
+            if connector.isOnline {
+                onboardMemorySection
             }
         }
         .disabled(!connector.canControlPerformance)
@@ -611,6 +661,28 @@ private struct LogitechGSettingsView: View {
             ActionPicker(title: "Forward Button", selection: Binding(get: { buttons.forward }, set: { action in
                 connector.setSideButtons(.init(back: buttons.back, forward: action))
             }))
+        }
+    }
+
+    private var onboardMemorySection: some View {
+        SettingsSection(title: "Onboard Memory", footer: "Saves DPI, report rate and triggers to the mouse a few seconds after a change, so it keeps them without Aeron Tools. Side button actions always need the app.") {
+            Toggle("Save settings to the mouse", isOn: Binding(
+                get: { connector.savesToOnboardProfile },
+                set: { connector.savesToOnboardProfile = $0 }
+            ))
+            switch connector.profileSaveState {
+            case .idle:
+                EmptyView()
+            case .saving:
+                LabeledContent("Status", value: "Saving…")
+            case .saved(let profile):
+                LabeledContent("Status", value: "Saved to profile \(profile)")
+            case .failed(let message):
+                LabeledContent("Status") {
+                    Text(message)
+                        .foregroundStyle(.orange)
+                }
+            }
         }
     }
 
