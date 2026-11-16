@@ -60,15 +60,29 @@ public final class MXMasterManager {
     /// Asks a receiver-connected device for its name; shares the device with the MX feature code.
     @ObservationIgnored var identitySession: HIDPPSession?
     @ObservationIgnored var identifyTask: Task<Void, Never>?
+    /// The latest push of control diversions; a newer one replaces it.
+    @ObservationIgnored var diversionTask: Task<Void, Never>?
+
+    /// Save button remaps to the mouse, so buttons with a native equivalent keep it without the app.
+    public var savesToMouse: Bool = UserDefaults.standard.object(forKey: "mxMaster.saveToMouse") as? Bool ?? true {
+        didSet {
+            UserDefaults.standard.set(savesToMouse, forKey: "mxMaster.saveToMouse")
+            // Turning it off also runs a save, which puts every button back to itself.
+            scheduleMouseSave()
+        }
+    }
+    public internal(set) var mouseSaveState: MouseSaveState = .idle
+    @ObservationIgnored var mouseSaveTask: Task<Void, Never>?
+    /// The mouse's controls by CID, read once per connection.
+    @ObservationIgnored var controlInfos: [UInt16: HIDPPProtocol.ControlInfo] = [:]
+    /// Remaps written in this run, to notice a mouse that forgets them when it powers off.
+    @ObservationIgnored var savedRemaps: [UInt16: UInt16] = [:]
 
     @ObservationIgnored private var dpiDebounceTask: Task<Void, Never>?
     @ObservationIgnored private var smartShiftDebounceTask: Task<Void, Never>?
 
     // Gesture & Smooth Scroll State
-    @ObservationIgnored var isGestureButtonHeld = false
-    @ObservationIgnored var gestureTriggeredDuringHold = false
-    @ObservationIgnored var gestureAccumulatedDelta: CGPoint = .zero
-    @ObservationIgnored let gestureDragThreshold: CGFloat = 36.0
+    @ObservationIgnored var gestureTracker = MXGestureTracker()
     @ObservationIgnored var lastSpaceOrTabSwitchTime: CFAbsoluteTime = 0
     @ObservationIgnored var smoothScrollVelocityY: Double = 0
     @ObservationIgnored private var smoothScrollVelocityX: Double = 0
@@ -149,6 +163,10 @@ public final class MXMasterManager {
 
         // Scroll, thumbwheel, button and gesture settings all live on the mouse as HID++ diversions.
         applyInputDiversion()
+
+        if savesToMouse, Self.buttonActions(oldValue).map(\.action) != Self.buttonActions(newValue).map(\.action) {
+            scheduleMouseSave()
+        }
     }
 
     /// Immediately pushes the current DPI, SmartShift, and button diversion configuration to the mouse.

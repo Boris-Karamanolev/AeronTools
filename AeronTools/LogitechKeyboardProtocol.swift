@@ -2,7 +2,7 @@ import Foundation
 
 // MARK: - Logitech Keyboard HID++ Features
 
-/// Pure builders and parsers for keyboard features used by `MXMechanicalConnector`. Layouts were mapped by
+/// Pure builders and parsers for keyboard features used by `MXKeyboardConnector`. Layouts were mapped by
 /// tracing Logi Options+ with an MX Mechanical Mini for Mac.
 nonisolated extension HIDPPProtocol {
     static let featureBacklight: UInt16 = 0x1982
@@ -43,6 +43,12 @@ nonisolated extension HIDPPProtocol {
         var isBatterySaving: Bool {
             get { options & Self.batterySavingBit != 0 }
             set { options = newValue ? options | Self.batterySavingBit : options & ~Self.batterySavingBit }
+        }
+
+        /// The effects this keyboard offers: bit n of `effects` set means effect n is supported. The MX Mechanical
+        /// reports 0x007F; the MX Keys Mini reports 0x0001 (static only).
+        var supportedEffects: [BacklightEffect] {
+            BacklightEffect.allCases.filter { effects & (1 << UInt16($0.rawValue)) != 0 }
         }
 
         /// The timeout Options+ shows; it sets all three durations to the same value.

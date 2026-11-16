@@ -161,17 +161,7 @@ final class HIDPPSession {
 
     /// Sends one request and waits for its reply. Returns the normalized reply, or nil on an error reply or timeout.
     func request(featureIndex: UInt8, function: UInt8, params: [UInt8] = []) async -> [UInt8]? {
-        let previous = queueTail
-        let task = Task<[UInt8]?, Never> {
-            await previous?.value
-            return await self.sendAndWait(featureIndex: featureIndex, function: function, params: params)
-        }
-        queueTail = Task { _ = await task.value }
-        return await task.value
-    }
-
-    private func sendAndWait(featureIndex: UInt8, function: UInt8, params: [UInt8]) async -> [UInt8]? {
-        await sendAndWait(packet: HIDPPProtocol.makeLongPacket(
+        await request(packet: HIDPPProtocol.makeLongPacket(
             deviceIndex: deviceIndex,
             featureIndex: featureIndex,
             functionID: function,
@@ -202,13 +192,20 @@ final class HIDPPSession {
         let task = Task<[UInt8]?, Never> {
             await previous?.value
             await previousRegister?.value
+            // The caller gave up while this waited its turn (e.g. a search replaced by a newer one): don't send,
+            // so the device isn't kept busy answering requests nobody is waiting for.
+            guard !Task.isCancelled else { return nil }
             return await self.sendAndWait(packet: packet)
         }
         queueTail = Task { _ = await task.value }
         if let receiver {
             Self.registerQueues[receiver] = Task { _ = await task.value }
         }
-        return await task.value
+        return await withTaskCancellationHandler {
+            await task.value
+        } onCancel: {
+            task.cancel()
+        }
     }
 
     /// The last register request queued for each receiver, by USB location.

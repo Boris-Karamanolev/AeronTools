@@ -51,7 +51,7 @@ public final class ThermalManager {
         isSupported = SMCConnection.shared != nil
     }
 
-    /// Starts polling the SMC. Only called while the menu bar popover is open.
+    /// Starts polling the SMC. Only called while something shows the readings: the open popover or a menu bar stat.
     public func startMonitoring() {
         guard isSupported, !isMonitoring else { return }
         isMonitoring = true
@@ -59,15 +59,19 @@ public final class ThermalManager {
         sample()
 
         timer?.invalidate()
-        timer = Timer.scheduledTimer(withTimeInterval: SMCConnection.pollInterval, repeats: true) { [weak self] _ in
-            Task { @MainActor [weak self] in
+        // Scheduled on the main run loop, so each tick runs on the main actor directly.
+        let timer = Timer.scheduledTimer(withTimeInterval: SMCConnection.pollInterval, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
                 guard let self, self.isMonitoring else { return }
                 self.sample()
             }
         }
+        // Lets macOS batch the wakeup with other work; a reading a moment late doesn't matter.
+        timer.tolerance = SMCConnection.pollTolerance
+        self.timer = timer
     }
 
-    /// Stops polling immediately to consume zero CPU when the popover is closed.
+    /// Stops polling immediately, so nothing runs while no readings are shown.
     public func stopMonitoring() {
         guard isMonitoring else { return }
         isMonitoring = false

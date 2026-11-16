@@ -132,6 +132,7 @@ extension MXMasterManager {
                 }
                 if slotChanged {
                     self.featureTable.removeAll()
+                    self.resetMouseMemory()
                     self.probeHIDPPFeatures()
                 }
                 return
@@ -153,7 +154,7 @@ extension MXMasterManager {
     private func handleReceiverEvent(_ event: [UInt8]) {
         guard event[2] == 0x41, event[4] & 0x40 == 0 else { return }
         guard !isIdentified || event[1] == activeDeviceIndex else { return }
-        releaseGestureHoldIfNeeded()
+        gestureTracker.cancel()
         isIdentified = false
         identifyReceiverDevice(family: snapshot.transport == .logiBolt ? .bolt : .unifying)
     }
@@ -173,8 +174,9 @@ extension MXMasterManager {
                 // A direct link has one device; on a receiver the mouse's slot is found by scanning.
                 activeDeviceIndex = candidate.deviceIndex
                 featureTable.removeAll()
+                resetMouseMemory()
                 pressedDivertedCIDs.removeAll()
-                releaseGestureHoldIfNeeded()
+                gestureTracker.cancel()
                 identitySession = HIDPPSession(device: candidate.device, deviceIndex: activeDeviceIndex)
                 isIdentified = false
                 // Skip opening without access: the open would trigger a blocking TCC prompt on the main thread.
@@ -250,6 +252,7 @@ extension MXMasterManager {
             identitySession = nil
             identifyTask?.cancel()
             featureTable.removeAll()
+            resetMouseMemory()
             snapshot = MXMasterSnapshot(
                 deviceName: "MX Master 4",
                 productID: 0,
@@ -580,7 +583,7 @@ extension MXMasterManager {
         }
         if let reprogIdx = featureTable[HIDPPProtocol.featureReprogControlsV4], featureIndex == reprogIdx,
            let motion = HIDPPProtocol.parseRawXYEvent(norm, expectedFeatureIndex: reprogIdx) {
-            handleDivertedRawXY(dx: motion.dx, dy: motion.dy)
+            handleGestureMotion(dx: motion.dx, dy: motion.dy)
             return
         }
 
@@ -613,6 +616,9 @@ extension MXMasterManager {
             )
         case HIDPPProtocol.featureReprogControlsV4, HIDPPProtocol.featureHiResWheel, HIDPPProtocol.featureThumbwheel:
             applyInputDiversion()
+            if featureID == HIDPPProtocol.featureReprogControlsV4, savesToMouse {
+                scheduleMouseSave()
+            }
         default:
             break
         }
@@ -718,27 +724,51 @@ extension MXMasterManager {
     }
 
     /// Diverts each control whose action isn't the system default, so only this mouse's presses trigger it.
-    /// The gesture button also diverts pointer motion while held (raw XY), which keeps the cursor still and
-    /// delivers the drag to `handleDivertedRawXY` instead.
+    /// The thumb button and the haptic panel also divert pointer motion while held (raw XY), which keeps the
+    /// cursor still and delivers the drag to `handleGestureMotion` instead.
     func configureDivertedButtonsIfNeeded(releasingAll: Bool = false) {
         guard let idx = featureTable[HIDPPProtocol.featureReprogControlsV4] else { return }
+        let gestures = config.gesturesEnabled
         let diversions: [(cid: UInt16, diverted: Bool, rawXY: Bool)] = [
-            (HIDPPProtocol.cidGestureThumbButton,
-             config.gesturesEnabled || config.gestureButtonClickAction != .systemDefault, config.gesturesEnabled),
+            (HIDPPProtocol.cidGestureThumbButton, gestures || config.gestureButtonClickAction != .systemDefault, gestures),
             (HIDPPProtocol.cidMiddleButton, config.middleButtonAction != .systemDefault, false),
             (HIDPPProtocol.cidBackButton, config.backButtonAction != .systemDefault, false),
             (HIDPPProtocol.cidForwardButton, config.forwardButtonAction != .systemDefault, false),
             (HIDPPProtocol.cidModeShiftButton, config.modeShiftButtonAction != .systemDefault, false),
-            (HIDPPProtocol.cidHapticPanelButton, config.hapticPanelButtonAction != .systemDefault, false)
+            (HIDPPProtocol.cidHapticPanelButton, gestures || config.hapticPanelButtonAction != .systemDefault, gestures)
         ]
-        for control in diversions {
-            sendHIDPPPacket(HIDPPProtocol.setControlReportingPacket(
-                deviceIndex: activeDeviceIndex,
+        let deviceIndex = activeDeviceIndex
+        func packet(_ control: (cid: UInt16, diverted: Bool, rawXY: Bool), rawXY: Bool) -> [UInt8] {
+            HIDPPProtocol.setControlReportingPacket(
+                deviceIndex: deviceIndex,
                 featureIndex: idx,
                 controlID: control.cid,
                 diverted: control.diverted && !releasingAll,
-                rawXY: control.rawXY
-            ))
+                rawXY: rawXY
+            )
+        }
+
+        // Releasing happens on quit, so it can't wait for replies. Otherwise each request waits for the
+        // mouse's answer: sent back to back, some get dropped, which left controls undiverted.
+        diversionTask?.cancel()
+        guard !releasingAll, let session = identitySession, session.deviceIndex == deviceIndex else {
+            for control in diversions {
+                sendHIDPPPacket(packet(control, rawXY: control.rawXY))
+            }
+            return
+        }
+        diversionTask = Task {
+            for control in diversions {
+                guard !Task.isCancelled else { return }
+                guard await session.request(packet: packet(control, rawXY: control.rawXY)) == nil,
+                      !Task.isCancelled else { continue }
+                // An error means the mouse lacks this control, or it can't report raw XY. In the second case, plain
+                // diversion still gets its press action working (just without drag gestures).
+                dlog(String(format: "MX Master: diverting control 0x%04X failed", control.cid))
+                if control.rawXY, control.diverted, await session.request(packet: packet(control, rawXY: false)) != nil {
+                    dlog(String(format: "MX Master: control 0x%04X diverted without raw XY", control.cid))
+                }
+            }
         }
     }
 
@@ -746,7 +776,9 @@ extension MXMasterManager {
     private func handleDivertedControl(_ cid: UInt16, isDown: Bool) {
         switch cid {
         case HIDPPProtocol.cidGestureThumbButton:
-            handleDivertedGestureButtonState(isDown: isDown)
+            handleGestureControl(cid, isDown: isDown, clickAction: config.gestureButtonClickAction)
+        case HIDPPProtocol.cidHapticPanelButton:
+            handleGestureControl(cid, isDown: isDown, clickAction: config.hapticPanelButtonAction)
         case HIDPPProtocol.cidMiddleButton:
             if isDown { performButtonAction(config.middleButtonAction) }
         case HIDPPProtocol.cidBackButton:
@@ -755,8 +787,6 @@ extension MXMasterManager {
             if isDown { performButtonAction(config.forwardButtonAction) }
         case HIDPPProtocol.cidModeShiftButton:
             if isDown { performButtonAction(config.modeShiftButtonAction) }
-        case HIDPPProtocol.cidHapticPanelButton:
-            if isDown { performButtonAction(config.hapticPanelButtonAction) }
         default:
             break
         }

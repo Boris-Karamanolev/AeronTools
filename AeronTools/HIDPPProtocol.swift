@@ -141,6 +141,51 @@ nonisolated public enum HIDPPProtocol {
         )
     }
 
+    /// Builds a `ReprogControlsV4.setCidReporting` packet that only remaps a control so it acts as `target`
+    /// (itself = no remap). No valid bits are set, so diversion and raw XY stay as they are.
+    public static func setControlRemapPacket(deviceIndex: UInt8, featureIndex: UInt8, controlID: UInt16, target: UInt16) -> [UInt8] {
+        makeLongPacket(
+            deviceIndex: deviceIndex,
+            featureIndex: featureIndex,
+            functionID: 0x03,
+            params: [UInt8(controlID >> 8), UInt8(controlID & 0xFF), 0x00, UInt8(target >> 8), UInt8(target & 0xFF)]
+        )
+    }
+
+    /// One control from `ReprogControlsV4.getCidInfo` (function `0x01`).
+    public struct ControlInfo: Sendable, Equatable {
+        public let cid: UInt16
+        public let flags: UInt8
+        /// Remap group this control belongs to (0 = none).
+        public let group: UInt8
+        /// Groups this control can be remapped to, one bit per group.
+        public let groupMask: UInt8
+
+        public var isRemappable: Bool { flags & 0x10 != 0 }
+
+        /// The mouse only accepts a remap onto a control in one of this control's allowed groups.
+        public func canRemap(to target: ControlInfo) -> Bool {
+            if target.cid == cid { return true }
+            return isRemappable && target.group != 0 && groupMask & (1 << (target.group - 1)) != 0
+        }
+    }
+
+    /// Parses a `getCidInfo` reply: [4…5] CID, [6…7] task, [8] flags, [9] position, [10] group, [11] group mask.
+    public static func parseControlInfo(_ reply: [UInt8]) -> ControlInfo? {
+        guard reply.count >= 12 else { return nil }
+        let cid = (UInt16(reply[4]) << 8) | UInt16(reply[5])
+        guard cid != 0 else { return nil }
+        return ControlInfo(cid: cid, flags: reply[8], group: reply[10], groupMask: reply[11])
+    }
+
+    /// Parses a `getCidReporting` reply (function `0x02`): [4…5] CID, [6] flags, [7…8] remap target. A target of
+    /// zero means not remapped, which is returned as the control itself.
+    public static func parseControlRemap(_ reply: [UInt8], controlID: UInt16) -> UInt16? {
+        guard reply.count >= 9, (UInt16(reply[4]) << 8) | UInt16(reply[5]) == controlID else { return nil }
+        let target = (UInt16(reply[7]) << 8) | UInt16(reply[8])
+        return target == 0 ? controlID : target
+    }
+
     /// Builds a `HiResWheel.setWheelMode` (`0x2121`, function `0x02`) packet. Diverted, wheel rotation arrives as
     /// HID++ events instead of scrolling; low resolution keeps one event step per notch.
     public static func setWheelModePacket(deviceIndex: UInt8, featureIndex: UInt8, diverted: Bool) -> [UInt8] {

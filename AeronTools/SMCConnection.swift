@@ -12,6 +12,8 @@ final class SMCConnection {
     /// Polling cadence shared by the wattage and thermal cards (and the menu bar stat). The SMC refreshes
     /// its keys about once per second; 5 s keeps the readings useful while waking the app far less often.
     static let pollInterval: TimeInterval = 5.0
+    /// How late a poll may run so macOS can group it with other wakeups.
+    static let pollTolerance: TimeInterval = 1.0
 
     private var connection: io_connect_t = 0
     /// Key metadata never changes at runtime, so it's cached to halve the number of SMC calls per read.

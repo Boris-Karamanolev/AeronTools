@@ -208,3 +208,60 @@ extension MXMasterSnapshot {
         )
     }
 }
+
+// MARK: - Hold-Drag Gestures
+
+/// Recognizes a hold-and-drag gesture on one control. Motion is summed for the whole hold and the direction
+/// is decided once, on release, from the dominant axis of the total drag, so a curved or diagonal start
+/// doesn't pick the wrong direction.
+nonisolated public struct MXGestureTracker: Sendable {
+    public enum Direction: Equatable, Sendable {
+        case up, down, left, right
+    }
+
+    public enum Outcome: Equatable, Sendable {
+        /// Released without dragging far enough.
+        case click
+        case gesture(Direction)
+        /// Not the control that started the hold.
+        case none
+    }
+
+    /// The control being held; a second control pressed meanwhile is ignored.
+    public private(set) var heldCID: UInt16?
+    private var dx = 0
+    private var dy = 0
+
+    public init() {}
+
+    public mutating func press(_ cid: UInt16) {
+        guard heldCID == nil else { return }
+        heldCID = cid
+        dx = 0
+        dy = 0
+    }
+
+    /// Raw XY motion: positive dy is toward the user.
+    public mutating func move(dx: Int, dy: Int) {
+        guard heldCID != nil else { return }
+        self.dx += dx
+        self.dy += dy
+    }
+
+    public mutating func release(_ cid: UInt16, threshold: Int) -> Outcome {
+        guard heldCID == cid else { return .none }
+        defer { cancel() }
+        guard max(abs(dx), abs(dy)) >= threshold else { return .click }
+        if abs(dy) >= abs(dx) {
+            return .gesture(dy < 0 ? .up : .down)
+        }
+        return .gesture(dx < 0 ? .left : .right)
+    }
+
+    /// Drops a hold that will never see its release (e.g. the mouse disconnected mid-gesture).
+    public mutating func cancel() {
+        heldCID = nil
+        dx = 0
+        dy = 0
+    }
+}

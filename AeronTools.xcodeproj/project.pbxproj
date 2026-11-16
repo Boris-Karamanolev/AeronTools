@@ -308,6 +308,7 @@
 				INFOPLIST_KEY_CFBundleDisplayName = "Aeron Tools";
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
 				INFOPLIST_KEY_LSUIElement = YES;
+				INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription = "Aeron Tools reads the battery level of Bluetooth accessories such as the Keychron M3 Mini 4K.";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "© 2026 Aeron Labs";
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]" = YES;
@@ -355,6 +356,7 @@
 				INFOPLIST_KEY_CFBundleDisplayName = "Aeron Tools";
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
 				INFOPLIST_KEY_LSUIElement = YES;
+				INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription = "Aeron Tools reads the battery level of Bluetooth accessories such as the Keychron M3 Mini 4K.";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "© 2026 Aeron Labs";
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]" = YES;

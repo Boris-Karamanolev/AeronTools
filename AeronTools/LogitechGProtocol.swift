@@ -254,11 +254,31 @@ nonisolated extension HIDPPProtocol {
         var dpi: Int?
         var reportRateHz: Int?
         var triggers: TriggerSettings?
+        /// Bindings for buttons by number (e.g. 4 and 5, the side buttons), from `mouseButtonBinding` or
+        /// `keyBinding`.
+        var buttonBindings: [Int: [UInt8]] = [:]
+    }
+
+    /// The profile's button table: one 4-byte binding per button, in button order (left, right, middle, back,
+    /// forward), from byte 48. The captured profile holds `80 01 00 01` … `80 01 00 10` there.
+    static let profileButtonTableOffset = 48
+
+    /// A binding that sends mouse button `button` (1-based): [0x80, 0x01, mask hi, mask lo].
+    static func mouseButtonBinding(_ button: Int) -> [UInt8] {
+        let mask = UInt16(1) << UInt16(max(button - 1, 0))
+        return [0x80, 0x01, UInt8(mask >> 8), UInt8(mask & 0xFF)]
+    }
+
+    /// A binding that sends a key: [0x80, 0x02, HID modifier bits, HID usage].
+    static func keyBinding(usage: UInt8, modifiers: UInt8) -> [UInt8] {
+        [0x80, 0x02, modifiers, usage]
     }
 
     /// A copy of a format-8 profile sector with only these fields replaced, and its CRC recomputed:
     /// [0…1] report rate index, [2] default DPI level, [4 + 5·level …] DPI X/Y (little-endian) and lift-off,
-    /// [38…43] triggers for both keys. Every other byte is kept exactly.
+    /// [38…43] triggers for both keys, [48 + 4·(button − 1) …] button bindings. Every other byte is kept
+    /// exactly. A button's binding is only replaced where the table holds a button or key binding (0x80), so a
+    /// macro or other assignment from G HUB is never overwritten.
     static func patchedProfileSector(_ sector: [UInt8], with settings: ProfileSettings) -> [UInt8]? {
         guard sector.count >= 64, hasValidCRC(sector: sector) else { return nil }
         var patched = sector
@@ -275,6 +295,11 @@ nonisolated extension HIDPPProtocol {
             patched[offset + 1] = UInt8(value >> 8)
             patched[offset + 2] = UInt8(value & 0xFF)
             patched[offset + 3] = UInt8(value >> 8)
+        }
+        for (button, binding) in settings.buttonBindings where binding.count == 4 {
+            let offset = profileButtonTableOffset + (button - 1) * 4
+            guard button >= 1, offset + 4 <= patched.count - 2, patched[offset] == 0x80 else { continue }
+            patched.replaceSubrange(offset..<(offset + 4), with: binding)
         }
         if let triggers = settings.triggers {
             for (key, base) in [(UInt8(0), 38), (UInt8(1), 41)] {

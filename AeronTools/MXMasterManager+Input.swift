@@ -42,15 +42,7 @@ extension MXMasterManager {
         if let index = featureTable[HIDPPProtocol.featureThumbwheel] {
             sendHIDPPPacket(HIDPPProtocol.setThumbwheelReportingPacket(deviceIndex: activeDeviceIndex, featureIndex: index, diverted: false))
         }
-        releaseGestureHoldIfNeeded()
-    }
-
-    /// Clears a stuck hold (e.g. the mouse disconnected mid-gesture).
-    func releaseGestureHoldIfNeeded() {
-        guard isGestureButtonHeld else { return }
-        isGestureButtonHeld = false
-        gestureTriggeredDuringHold = false
-        gestureAccumulatedDelta = .zero
+        gestureTracker.cancel()
     }
 
     // MARK: - Diverted Wheel
@@ -88,8 +80,9 @@ extension MXMasterManager {
         smoothScrollVelocityY += verticalTicks * 9.5
         guard smoothScrollTimer == nil else { return }
 
+        // Scheduled on the main run loop, so each tick runs on the main actor directly, without a task per tick.
         smoothScrollTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 120.0, repeats: true) { [weak self] _ in
-            Task { @MainActor [weak self] in
+            MainActor.assumeIsolated {
                 self?.stepSmoothScroll()
             }
         }
@@ -165,40 +158,42 @@ extension MXMasterManager {
         }
     }
 
-    // MARK: - Diverted Buttons & Hold-Drag Gestures
+    // MARK: - Hold-Drag Gestures
 
-    func handleDivertedGestureButtonState(isDown: Bool) {
-        if isDown {
-            isGestureButtonHeld = true
-            gestureTriggeredDuringHold = false
-            gestureAccumulatedDelta = .zero
-        } else {
-            let wasHeld = isGestureButtonHeld
-            let didDrag = gestureTriggeredDuringHold
-            releaseGestureHoldIfNeeded()
-            if wasHeld && !didDrag {
-                performButtonAction(config.gestureButtonClickAction)
-            }
+    /// Raw XY reports sensor counts at the current DPI, so the drag distance is set in travel (about 3 mm):
+    /// a click with a little wobble stays a click at any DPI.
+    private var gestureDragThreshold: Int {
+        max(36, Int(Double(config.dpi) * 0.12))
+    }
+
+    /// Press/release of a control that can start a hold-and-drag gesture (the thumb button or the haptic panel).
+    /// The gesture is decided on release, from the whole drag; releasing without dragging runs `clickAction`.
+    func handleGestureControl(_ cid: UInt16, isDown: Bool, clickAction: AccessoryButtonAction) {
+        guard !isDown else {
+            gestureTracker.press(cid)
+            return
+        }
+        switch gestureTracker.release(cid, threshold: gestureDragThreshold) {
+        case .click:
+            performButtonAction(clickAction)
+        case .gesture(.up):
+            performButtonAction(config.gestureUpAction)
+        case .gesture(.down):
+            performButtonAction(config.gestureDownAction)
+        case .gesture(.left):
+            performButtonAction(config.gestureLeftAction)
+        case .gesture(.right):
+            performButtonAction(config.gestureRightAction)
+        case .none:
+            break
         }
     }
 
-    /// Pointer motion while the gesture button is held. The mouse diverts it (raw XY) instead of moving the
-    /// cursor, so only this mouse's motion ever reaches here. Positive dy = moved toward the user.
-    func handleDivertedRawXY(dx: Int, dy: Int) {
-        guard isGestureButtonHeld, config.gesturesEnabled, !gestureTriggeredDuringHold else { return }
-        gestureAccumulatedDelta.x += CGFloat(dx)
-        gestureAccumulatedDelta.y += CGFloat(dy)
-
-        let absX = abs(gestureAccumulatedDelta.x)
-        let absY = abs(gestureAccumulatedDelta.y)
-        guard max(absX, absY) >= gestureDragThreshold else { return }
-
-        gestureTriggeredDuringHold = true
-        if absY >= absX {
-            performButtonAction(gestureAccumulatedDelta.y < 0 ? config.gestureUpAction : config.gestureDownAction)
-        } else {
-            performButtonAction(gestureAccumulatedDelta.x < 0 ? config.gestureLeftAction : config.gestureRightAction)
-        }
+    /// Pointer motion while a gesture control is held. The mouse diverts it (raw XY) instead of moving the cursor,
+    /// so only this mouse's motion ever reaches here.
+    func handleGestureMotion(dx: Int, dy: Int) {
+        guard config.gesturesEnabled else { return }
+        gestureTracker.move(dx: dx, dy: dy)
     }
 
     // MARK: - Action Execution

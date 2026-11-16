@@ -14,12 +14,14 @@ struct MXMasterSettingsTabView: View {
     private static let actions = AccessoryButtonAction.allCases
 
     var body: some View {
-        Group {
+        // Like the other accessories, the mouse's own sections only show while it's connected.
+        if manager.isAvailable {
             performanceSection
             scrollingSection
             thumbwheelSection
             buttonsSection
             gesturesSection
+            onboardMemorySection
         }
     }
 
@@ -91,13 +93,32 @@ struct MXMasterSettingsTabView: View {
     }
 
     private var gesturesSection: some View {
-        SettingsSection(title: "Gestures", footer: "Hold the thumb button and move the mouse in a direction.") {
+        SettingsSection(title: "Gestures", footer: "Hold the thumb button or the haptic panel and move the mouse in a direction.") {
             Toggle("Hold & drag gestures", isOn: $manager.config.gesturesEnabled)
             if manager.config.gesturesEnabled {
                 ActionPicker(title: "Up", selection: $manager.config.gestureUpAction, actions: Self.actions)
                 ActionPicker(title: "Down", selection: $manager.config.gestureDownAction, actions: Self.actions)
                 ActionPicker(title: "Left", selection: $manager.config.gestureLeftAction, actions: Self.actions)
                 ActionPicker(title: "Right", selection: $manager.config.gestureRightAction, actions: Self.actions)
+            }
+        }
+    }
+
+    private var onboardMemorySection: some View {
+        SettingsSection(title: "Onboard Memory", footer: "Saves buttons set to Back, Forward or Ratchet / Free-Spin to the mouse a few seconds after a change, so they keep working without Aeron Tools. Gestures and other actions need the app.") {
+            Toggle("Save settings to the mouse", isOn: $manager.savesToMouse)
+            switch manager.mouseSaveState {
+            case .idle:
+                EmptyView()
+            case .saving:
+                LabeledContent("Status", value: "Saving…")
+            case .saved(let buttons):
+                LabeledContent("Status", value: buttons.isEmpty ? "Saved; no buttons have a native action" : "Saved: \(buttons.formatted(.list(type: .and)))")
+            case .failed(let message):
+                LabeledContent("Status") {
+                    Text(message)
+                        .foregroundStyle(.orange)
+                }
             }
         }
     }

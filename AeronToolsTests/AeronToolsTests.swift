@@ -456,6 +456,36 @@ struct LogitechGProtocolTests {
         #expect(HIDPPProtocol.patchedProfileSector(corrupt, with: settings) == nil)
     }
 
+    @Test("Side button bindings go in the profile's button table, and only over button or key bindings")
+    func profileButtonBindings() throws {
+        let original = capturedProfile
+        // The factory table: buttons 1…5 as themselves.
+        for button in 1...5 {
+            let offset = HIDPPProtocol.profileButtonTableOffset + (button - 1) * 4
+            #expect(Array(original[offset..<(offset + 4)]) == HIDPPProtocol.mouseButtonBinding(button))
+        }
+
+        // Back as ⌘[, forward left as the plain button.
+        var settings = HIDPPProtocol.ProfileSettings()
+        settings.buttonBindings = [
+            HIDPPProtocol.backSideButton: HIDPPProtocol.keyBinding(usage: 0x2F, modifiers: 0x08),
+            HIDPPProtocol.forwardSideButton: HIDPPProtocol.mouseButtonBinding(5),
+        ]
+        let patched = try #require(HIDPPProtocol.patchedProfileSector(original, with: settings))
+        #expect(HIDPPProtocol.hasValidCRC(sector: patched))
+        #expect(Array(patched[60..<64]) == [0x80, 0x02, 0x08, 0x2F])
+        let changed = Set((0..<255).filter { patched[$0] != original[$0] })
+        #expect(changed.isSubset(of: [60, 61, 62, 63, 253, 254]))
+
+        // A slot holding something else (e.g. a G HUB macro) is left alone.
+        var withMacro = original
+        withMacro.replaceSubrange(60..<64, with: [0x00, 0x01, 0x02, 0x00])
+        let crc = HIDPPProtocol.profileCRC(withMacro[..<253])
+        withMacro[253] = UInt8(crc >> 8)
+        withMacro[254] = UInt8(crc & 0xFF)
+        #expect(HIDPPProtocol.patchedProfileSector(withMacro, with: settings) == withMacro)
+    }
+
     @Test("A 255-byte sector reads as 16 chunks, the last one overlapping")
     func sectorAssembly() throws {
         let offsets = HIDPPProtocol.sectorReadOffsets(sectorSize: 255)
@@ -497,7 +527,7 @@ struct ReceiverPairingTests {
         #expect(paired.name == "MX MCHNCL M")
         #expect(paired.kind == .keyboard)
         #expect(!paired.isPointingDevice)
-        #expect(MXMechanicalConnector.isMXMechanical(paired.name))
+        #expect(MXKeyboardConnector.isMXMechanical(paired.name))
         #expect(!MXMasterManager.isMXMasterName(paired.name))
     }
 
@@ -516,8 +546,24 @@ struct ReceiverPairingTests {
         #expect(MXMasterManager.isMXMasterName("MX Master 4"))
         #expect(MXMasterManager.isMXMasterName("MX Master 3S for Mac"))
         #expect(!MXMasterManager.isMXMasterName("MX Keys Mini"))
-        #expect(MXMechanicalConnector.isMXMechanical("MX Mechanical Mini for Mac"))
-        #expect(!MXMechanicalConnector.isMXMechanical("MX Keys Mini"))
+        #expect(MXKeyboardConnector.isMXMechanical("MX Mechanical Mini for Mac"))
+        #expect(!MXKeyboardConnector.isMXMechanical("MX Keys Mini"))
+        #expect(MXKeyboardConnector.isMXKeysMini("MX Keys Mini"))
+        #expect(!MXKeyboardConnector.isMXKeysMini("MX MCHNCL M"))
+        #expect(!MXKeyboardConnector.isMXKeysMini("MX Master 4"))
+    }
+
+    @Test("Bolt pairing records decode the MX Keys Mini")
+    func boltKeysMiniPairing() throws {
+        // Captured from a Logi Bolt receiver: slot 1 pairing info and name ("MX Keys Mini").
+        let info = packet("11 FF 83 B5 51 01 69 B3 ED 25 B9 82 01 00 01 14 01 00 00 00")
+        let name = packet("11 FF 83 B5 61 01 0C 4D 58 20 4B 65 79 73 20 4D 69 6E 69 00")
+        let paired = try #require(HIDPPSession.pairedDevice(kindByte: info[5], name: name, lengthAt: 6))
+        #expect(paired.name == "MX Keys Mini")
+        #expect(paired.kind == .keyboard)
+        #expect(MXKeyboardConnector.isMXKeysMini(paired.name))
+        #expect(!MXKeyboardConnector.isMXMechanical(paired.name))
+        #expect(!MXMasterManager.isMXMasterName(paired.name))
     }
 }
 
@@ -538,6 +584,16 @@ struct KeyboardBacklightTests {
         #expect(defaults.isBatterySaving)
         #expect(defaults.level == 4)
         #expect(defaults.durationSeconds == 30)
+        #expect(defaults.supportedEffects == HIDPPProtocol.BacklightEffect.allCases)
+
+        // MX Keys Mini: static backlight only.
+        let keysMini = try #require(HIDPPProtocol.parseBacklightConfig(packet("11 01 0B 0A 01 0D 3D 01 00 02 06 00 06 00 3C 00 00 00 00 00")))
+        #expect(keysMini.isEnabled)
+        #expect(keysMini.isAutomaticBrightness)
+        #expect(keysMini.isBatterySaving)
+        #expect(keysMini.level == 2)
+        #expect(keysMini.durationSeconds == 30)
+        #expect(keysMini.supportedEffects == [.staticLight])
         #expect(defaults.durationCharging == 60)
         #expect(defaults.effects == 0x007F)
 
@@ -635,5 +691,427 @@ struct KeyboardLightingTests {
         let event: [UInt8] = [0x11, 0xFF, 0x0D, 0x00, 0x00, 0x32, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
         #expect(HIDPPProtocol.parseBrightnessLevel(event) == 50)
         #expect(HIDPPProtocol.setBrightnessParams(100) == [0x00, 0x64])
+    }
+}
+
+// MARK: - Keychron Mouse Protocol
+
+@Suite("Keychron 4K mouse packets, from an M3 Mini 4K on the 4K Link receiver")
+struct KeychronMouseProtocolTests {
+    /// A settings reply captured from the mouse through the receiver.
+    static let settingsReply: [UInt8] = [
+        0x44, 0x00, 0xB4, 0x01, 0x20, 0x00, 0x1F, 0x01, 0x90, 0x01, 0x90, 0x01, 0x20, 0x03, 0x20, 0x03,
+        0x40, 0x06, 0x40, 0x06, 0x80, 0x0C, 0x80, 0x0C, 0x88, 0x13, 0x88, 0x13, 0xFF, 0x00, 0x00, 0x00,
+        0xFF, 0x00, 0xFF, 0xFF, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0xFF, 0x01, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x84, 0x03, 0x84, 0x03, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1C,
+    ]
+
+    @Test("Packets are 64 bytes, routed with 0x40, and checksummed to 0xA1")
+    func packetFraming() {
+        let packet = KeychronMouseProtocol.packet(.readSettings, routed: true)
+        #expect(packet.count == 64)
+        #expect(Array(packet[0...3]) == [0x44, 0x00, 0x81, 0x01])
+        #expect(packet[0..<64].reduce(0, &+) == 0xA1)
+        #expect(KeychronMouseProtocol.packet(.power, routed: false)[0] == 0x01)
+    }
+
+    @Test("Replies match on the command byte, routing included, and the sub-command")
+    func replyMatching() {
+        let request = KeychronMouseProtocol.packet(.power, routed: true)
+        #expect(KeychronMouseProtocol.isReply([0x41, 0x00, 0x8C, 0x01, 0x00], to: request))
+        // The receiver's own link report must not answer a request meant for the mouse.
+        #expect(!KeychronMouseProtocol.isReply([0x01, 0x00, 0x8C, 0x01, 0x0A], to: request))
+    }
+
+    @Test("Power reports carry battery, charging and the active DPI stage")
+    func powerParsing() {
+        let discharging = KeychronMouseProtocol.Power([0x41, 0x00, 0x8C, 0x01, 0x00, 0x00, 0x59, 0x00, 0x02, 0x00, 0x05])
+        #expect(discharging?.percent == 89)
+        #expect(discharging?.isCharging == false)
+        #expect(discharging?.activeStage == 2)
+        #expect(KeychronMouseProtocol.Power([0x01, 0x00, 0x8C, 0x01, 0x00, 0x01, 0x59, 0x00, 0x01])?.isCharging == true)
+    }
+
+    @Test("Version replies carry the model ID little-endian")
+    func modelID() {
+        #expect(KeychronMouseProtocol.modelID(fromVersion: [0x40, 0x00, 0x9A, 0x00, 0x22, 0x06]) == KeychronMouseProtocol.m3MiniModelID)
+    }
+
+    @Test("Settings decode stages, DPI, lift-off and flags")
+    func settingsParsing() throws {
+        let settings = try #require(KeychronMouseProtocol.Settings(Self.settingsReply))
+        #expect(settings.stageCount == 5)
+        #expect(settings.activeStage == 1)
+        #expect((0..<5).map(settings.dpi(stage:)) == [400, 800, 1600, 3200, 5000])
+        #expect(settings.liftOffMillimeters == 1)
+        #expect(settings.isMotionSyncOn)
+        #expect(!settings.isAngleSnappingOn)
+    }
+
+    @Test("Writes send the block back whole, changing only what was set")
+    func settingsWrite() throws {
+        var settings = try #require(KeychronMouseProtocol.Settings(Self.settingsReply))
+        settings.setDPI(5050, stage: 4)
+        settings.isAngleSnappingOn = true
+        let packet = KeychronMouseProtocol.packet(.writeSettings, routed: true, payload: settings.block)
+        var expected = Self.settingsReply
+        expected[24...27] = [0xBA, 0x13, 0xBA, 0x13]
+        expected[4] = 0x21
+        #expect(Array(packet[0...3]) == [0x44, 0x00, 0xB5, 0x02])
+        #expect(packet[4...55] == expected[4...55])
+        #expect(packet[0..<64].reduce(0, &+) == 0xA1)
+    }
+
+    @Test("Report rate codes are 125 Hz doubled per step, as measured on the receiver")
+    func reportRates() throws {
+        var settings = try #require(KeychronMouseProtocol.Settings(Self.settingsReply))
+        #expect(settings.reportRateHz == 125)
+        settings.reportRateHz = 4000
+        #expect(settings.block[5] == 5)
+        settings.reportRateHz = 1000
+        #expect(settings.block[5] == 3)
+        settings.reportRateHz = 300
+        #expect(settings.block[5] == 3, "unsupported rates are ignored")
+        let power = KeychronMouseProtocol.Power([0x41, 0x00, 0x8C, 0x01, 0x00, 0x00, 0x59, 0x00, 0x01, 0x00, 0x05])
+        #expect(power?.maxReportRateHz == 4000)
+    }
+
+    @Test("Side buttons read from the button map and encode the shortcuts the mouse accepted")
+    @MainActor
+    func sideButtons() throws {
+        // A button map reply captured from the mouse: left, right, middle, back, forward, DPI, …, wheel.
+        var reply: [UInt8] = [0x43, 0x00, 0xA4, 0x01]
+        reply += [0x01, 0x00, 0xF0, 0x00, 0x01, 0x00, 0xF1, 0x00, 0x01, 0x00, 0xF2, 0x00, 0x01, 0x00, 0xF3, 0x00]
+        reply += [0x01, 0x00, 0xF4, 0x00, 0x07, 0x00, 0x03, 0x00, 0x05, 0x00, 0x03, 0x00, 0x01, 0x00, 0xF8, 0x01]
+        reply += [UInt8](repeating: 0, count: 64 - reply.count)
+
+        let back = try #require(KeychronMouseProtocol.assignment(of: .back, inButtonMap: reply))
+        let forward = try #require(KeychronMouseProtocol.assignment(of: .forward, inButtonMap: reply))
+        #expect(back == KeychronMouseProtocol.SideButton.back.factoryAssignment)
+        #expect(KeychronMouseProtocol.action(for: back, on: .back) == .systemDefault)
+        #expect(KeychronMouseProtocol.action(for: forward, on: .forward) == .systemDefault)
+        #expect(KeychronMouseProtocol.action(for: back, on: .forward) == nil)
+
+        // ⌘[ as written to and confirmed on the mouse.
+        #expect(KeychronMouseProtocol.assignment(for: .navigateBack, on: .back) == [0x00, 0x08, 0x2F, 0x00])
+        #expect(KeychronMouseProtocol.assignment(for: .toggleCaffeine, on: .back) == nil)
+        for action in KeychronMouseProtocol.buttonActions {
+            // Shortcuts turned off on this Mac can't be assigned.
+            guard let assignment = KeychronMouseProtocol.assignment(for: action, on: .forward) else { continue }
+            #expect(KeychronMouseProtocol.action(for: assignment, on: .forward) == action)
+        }
+
+        let write = KeychronMouseProtocol.packet(.writeButton, routed: true, payload: [0x03, 0x00, 0x08, 0x2F, 0x00])
+        #expect(Array(write[0...8]) == [0x43, 0x00, 0x85, 0x04, 0x03, 0x00, 0x08, 0x2F, 0x00])
+    }
+
+    @Test("Custom shortcuts become key entries with HID usages and modifier bits")
+    @MainActor
+    func shortcutEncoding() {
+        // ⌘W, a custom Mission Control shortcut.
+        let commandW = AccessoryActions.Shortcut(keyCode: UInt16(kVK_ANSI_W), flags: [.maskCommand])
+        #expect(KeychronMouseProtocol.keyAssignment(commandW) == [0x00, 0x08, 0x1A, 0x00])
+        // ⌃⌥⇧→
+        let arrow = AccessoryActions.Shortcut(keyCode: UInt16(kVK_RightArrow), flags: [.maskControl, .maskAlternate, .maskShift])
+        #expect(KeychronMouseProtocol.keyAssignment(arrow) == [0x00, 0x07, 0x4F, 0x00])
+        // A key without a HID usage in the table can't be sent.
+        let unknown = AccessoryActions.Shortcut(keyCode: 0xFF, flags: [])
+        #expect(KeychronMouseProtocol.keyAssignment(unknown) == nil)
+    }
+
+    @Test("DPI rounds to 50 within 100…26000")
+    func dpiClamping() {
+        #expect(KeychronMouseProtocol.clampDPI(824) == 800)
+        #expect(KeychronMouseProtocol.clampDPI(30) == 100)
+        #expect(KeychronMouseProtocol.clampDPI(40_000) == 26_000)
+    }
+}
+
+// MARK: - Razer Chroma Protocol
+
+@Suite("Razer Chroma packet framing and parsing")
+struct RazerChromaProtocolTests {
+    typealias P = RazerChromaProtocol
+
+    /// A 90-byte reply with the given status, command and arguments.
+    private func reply(status: UInt8 = 0x02, _ command: P.Command, _ arguments: [UInt8]) -> [UInt8] {
+        var reply = P.packet(command, arguments: arguments)
+        reply[0] = status
+        return reply
+    }
+
+    @Test("Packets are 90 bytes with transaction ID, size, command and an XOR checksum of bytes 2–87")
+    func packetLayout() {
+        let packet = P.setBrightnessPacket(0x80)
+        #expect(packet.count == 90)
+        #expect(Array(packet[0..<11]) == [0x00, 0x1F, 0x00, 0x00, 0x00, 0x03, 0x0F, 0x04, 0x01, 0x00, 0x80])
+        #expect(packet[88] == 0x03 ^ 0x0F ^ 0x04 ^ 0x01 ^ 0x00 ^ 0x80)
+        #expect(packet[89] == 0x00)
+    }
+
+    @Test("Effect requests use the size and arguments the dock accepted")
+    func effectPackets() {
+        var lighting = P.Lighting(mode: .staticColor, primary: P.RGB(red: 0, green: 255, blue: 0))
+        #expect(Array(P.setEffectPacket(lighting)![5...16]) == [0x09, 0x0F, 0x02, 0x01, 0x00, 0x01, 0x00, 0x00, 0x01, 0x00, 0xFF, 0x00])
+        lighting.mode = .breathing
+        lighting.breathing = .dual
+        lighting.secondary = P.RGB(red: 0, green: 0, blue: 255)
+        #expect(Array(P.setEffectPacket(lighting)![5...19]) == [0x0C, 0x0F, 0x02, 0x01, 0x00, 0x02, 0x02, 0x00, 0x02, 0x00, 0xFF, 0x00, 0x00, 0x00, 0xFF])
+        lighting.mode = .wave
+        lighting.waveDirection = .rightToLeft
+        #expect(Array(P.setEffectPacket(lighting)![5...12]) == [0x06, 0x0F, 0x02, 0x01, 0x00, 0x04, 0x02, 0x28])
+        lighting.mode = nil
+        #expect(P.setEffectPacket(lighting) == nil)
+    }
+
+    @Test("Replies are matched to their request and report busy, success or unsupported")
+    func replyStatus() {
+        let request = P.getBrightnessPacket()
+        #expect(P.status(of: reply(.getBrightness, [0x01, 0x00, 0xFF]), answering: request) == .success)
+        #expect(P.status(of: reply(status: 0x01, .getBrightness, []), answering: request) == .busy)
+        #expect(P.status(of: reply(status: 0x05, .getBrightness, []), answering: request) == .notSupported)
+        #expect(P.status(of: reply(.firmware, []), answering: request) == nil)
+    }
+
+    @Test("Firmware, serial and brightness decode from the dock's replies")
+    func identityReplies() {
+        #expect(P.parseFirmware(reply(.firmware, [0x01, 0x00])) == "1.0")
+        #expect(P.parseSerial(reply(.serial, Array("712324U11900409".utf8))) == "712324U11900409")
+        #expect(P.parseBrightness(reply(.getBrightness, [0x01, 0x00, 0x80])) == 0x80)
+    }
+
+    @Test("Stored effects decode, keeping colors the effect doesn't use")
+    func effectReplies() {
+        let previous = P.Lighting(mode: .off, primary: P.RGB(red: 1, green: 2, blue: 3))
+        let spectrum = P.parseLighting(reply(.getEffect, [0x01, 0x00, 0x03, 0x00, 0x04, 0x01, 0xFF, 0x00, 0x00]), previous: previous)
+        #expect(spectrum?.mode == .spectrum)
+        #expect(spectrum?.primary == P.RGB(red: 1, green: 2, blue: 3))
+
+        let breathing = P.parseLighting(reply(.getEffect, [0x01, 0x00, 0x02, 0x02, 0x00, 0x02, 0xFF, 0x00, 0x00, 0x00, 0x00, 0xFF]), previous: previous)
+        #expect(breathing?.mode == .breathing)
+        #expect(breathing?.breathing == .dual)
+        #expect(breathing?.primary == P.RGB(red: 255, green: 0, blue: 0))
+        #expect(breathing?.secondary == P.RGB(red: 0, green: 0, blue: 255))
+
+        let wave = P.parseLighting(reply(.getEffect, [0x01, 0x00, 0x04, 0x02, 0x28]), previous: previous)
+        #expect(wave?.mode == .wave)
+        #expect(wave?.waveDirection == .rightToLeft)
+
+        let unknown = P.parseLighting(reply(.getEffect, [0x01, 0x00, 0x07]), previous: previous)
+        #expect(unknown != nil)
+        #expect(unknown?.mode == nil)
+    }
+}
+
+// MARK: - Dock Topology
+
+@Suite("Dock port mapping")
+struct DockTopologyTests {
+    typealias T = DockTopology
+
+    private func usb(_ id: UInt64, parent: UInt64?, _ location: UInt32, vendor: Int = 0x1234, product: Int = 1,
+                     _ name: String, vendorName: String? = nil, deviceClass: Int = 0, speed: Int = 2,
+                     interface: String? = nil, serial: String? = nil) -> T.USBNode {
+        T.USBNode(id: id, parentID: parent, locationID: location, vendorID: vendor, productID: product, name: name,
+                  vendorName: vendorName, deviceClass: deviceClass, speed: speed, networkInterface: interface,
+                  serialNumber: serial)
+    }
+
+    /// A Razer Thunderbolt 4 Dock Chroma's tree: the controller's hubs, Razer's hubs on their port 4, an LG
+    /// monitor hub on USB-A 2 (on both the USB 2 and USB 3 trees), a controller on USB-A 3, the built-in Ethernet
+    /// adapter and lighting controller, and a USB-C display cable's billboard in Thunderbolt 2.
+    private var razerTree: [T.USBNode] {
+        [
+            usb(1, parent: nil, 0x0210_0000, vendor: 0x1D5C, "USB2.0 Hub", deviceClass: 9),
+            usb(2, parent: 1, 0x0214_0000, vendor: 0x1532, product: 0x0F2F, "USB2.0 Hub", deviceClass: 9),
+            usb(3, parent: 2, 0x0214_2000, vendor: 0x0BDA, "USB2.1 Hub", deviceClass: 9),
+            usb(4, parent: 3, 0x0214_2200, vendor: 0x046D, "USB Receiver", vendorName: "Logitech"),
+            usb(5, parent: 3, 0x0214_2300, vendor: 0x0BDA, "LG Monitor Headset MIC", vendorName: "LG Electronics Inc."),
+            usb(6, parent: 2, 0x0214_3000, vendor: 0x045E, "XBOX 360 For Windows", vendorName: "ShanWan", deviceClass: 255, speed: 1),
+            usb(7, parent: 2, 0x0214_6000, vendor: 0x1532, product: 0x0F21, "RAZER THUNDERBOLT 4 DOCK CHROMA"),
+            usb(8, parent: 1, 0x0212_0000, vendor: 0x2109, "USB 2.0 BILLBOARD", vendorName: "VIA Technologies Inc.", deviceClass: 0x11),
+            usb(10, parent: nil, 0x0220_0000, vendor: 0x8087, "USB3.0 Hub", deviceClass: 9),
+            usb(11, parent: 10, 0x0224_0000, vendor: 0x1532, product: 0x0F30, "USB3.0 Hub", deviceClass: 9),
+            usb(12, parent: 11, 0x0224_5000, vendor: 0x0BDA, "USB 10/100/1000 LAN", speed: 3, interface: "en7"),
+            usb(13, parent: 11, 0x0224_2000, vendor: 0x0BDA, "USB3.2 Hub", deviceClass: 9),
+        ]
+    }
+
+    /// A Satechi Thunderbolt 4 Slim Hub Pro's tree: a monitor's hub in Thunderbolt 2 (with its own billboard), a
+    /// USB-C to DisplayPort cable in Thunderbolt 3, a receiver in the USB-A port and the hub's own billboard
+    /// device on controller port 5.
+    private var satechiTree: [T.USBNode] {
+        [
+            usb(1, parent: nil, 0x0010_0000, vendor: 0x1D5C, "USB2.0 Hub", deviceClass: 9),
+            usb(2, parent: 1, 0x0012_0000, vendor: 0x05F6, "USB2.0 Hub", deviceClass: 9),
+            usb(3, parent: 2, 0x0012_5000, vendor: 0x2109, "USB Billboard Device", deviceClass: 254),
+            usb(4, parent: 2, 0x0012_3000, vendor: 0x3434, "Keychron 4K Link", vendorName: "Keychron"),
+            usb(5, parent: 1, 0x0013_0000, vendor: 0x0639, "Billboard", vendorName: "Chrontel", deviceClass: 0x11, speed: 1),
+            usb(6, parent: 1, 0x0014_0000, vendor: 0x046D, "USB Receiver", vendorName: "Logitech", speed: 1),
+            usb(7, parent: 1, 0x0015_0000, vendor: 0x310E, product: 0x0952, "ST-HT4SHM-US", vendorName: "Sariana LLC dba Satechi",
+                speed: 1, serial: "11AD1D0AB7B17E08371B0B00"),
+            usb(10, parent: nil, 0x0020_0000, vendor: 0x8087, "USB3.0 Hub", deviceClass: 9),
+            usb(11, parent: 10, 0x0022_0000, vendor: 0x05F6, "USB3.0 Hub", deviceClass: 9, speed: 3),
+            // The Mac's other ports are on other buses and must be left out.
+            usb(20, parent: nil, 0x0110_0000, vendor: 0x05E3, "USB2.0 Hub", deviceClass: 9),
+            usb(21, parent: 20, 0x0111_0000, vendor: 0x1234, "Flash Drive"),
+        ]
+    }
+
+    @Test("A device's hub port comes from the first location digit its hub leaves empty")
+    func portNumbers() {
+        #expect(T.portNumber(of: 0x0214_2000, under: 0x0214_0000) == 2)
+        #expect(T.portNumber(of: 0x0214_2300, under: 0x0214_2000) == 3)
+        #expect(T.portNumber(of: 0x0224_5000, under: 0x0224_0000) == 5)
+    }
+
+    @Test("Razer: USB-A ports on Razer's hubs list devices behind hubs once, internal devices are left out")
+    func razerUSBAPorts() {
+        let layout = T.layout(model: .razerThunderbolt4, usb: razerTree, thunderbolt: [])
+        #expect(layout.isPresent)
+        #expect(layout.ethernetInterface == "en7")
+        #expect(layout.usbA.count == 4)
+        #expect(layout.usbA[0].devices.isEmpty)
+        #expect(layout.usbA[1].devices.map(\.name) == ["Logitech USB Receiver", "LG Monitor Headset MIC"])
+        #expect(layout.usbA[2].devices.map(\.name) == ["ShanWan XBOX 360 For Windows"])
+        #expect(layout.usbA[3].devices.isEmpty)
+        #expect(layout.thunderbolt.map { $0.devices.map(\.name) } == [[], ["USB-C Display Adapter"], []])
+    }
+
+    @Test("USB-C devices go to their Thunderbolt port; Thunderbolt devices behind the dock take the free ones")
+    func thunderboltPorts() {
+        let tree = razerTree + [usb(20, parent: 10, 0x0221_0000, vendor: 0x0781, "Extreme SSD", vendorName: "SanDisk", speed: 4)]
+        let thunderbolt = [
+            T.ThunderboltNode(id: 100, parentSwitchID: nil, vendorID: 0x05AC, modelID: nil, vendorName: "Apple Inc.", modelName: "iOS"),
+            T.ThunderboltNode(id: 101, parentSwitchID: 100, vendorID: 0x1532, modelID: 0x122E, vendorName: "Razer", modelName: "Thunderbolt 4 Dock"),
+            T.ThunderboltNode(id: 102, parentSwitchID: 101, vendorID: 0x05AC, modelID: 1, vendorName: "Apple Inc.", modelName: "Studio Display"),
+            T.ThunderboltNode(id: 103, parentSwitchID: 102, vendorID: 0x1234, modelID: 1, vendorName: "Other", modelName: "Daisy-chained Drive"),
+        ]
+        let layout = T.layout(model: .razerThunderbolt4, usb: tree, thunderbolt: thunderbolt)
+        #expect(layout.thunderbolt[0].devices.map(\.name) == ["SanDisk Extreme SSD"])
+        #expect(layout.thunderbolt[1].devices.map(\.name) == ["USB-C Display Adapter"])
+        #expect(layout.thunderbolt[2].devices.map(\.name) == ["Apple Inc. Studio Display"])
+    }
+
+    @Test("Satechi: Thunderbolt ports, the single USB-A port and the serial number come from its own bus")
+    func satechiPorts() {
+        let layout = T.layout(model: .satechiSlimHubPro, usb: satechiTree, thunderbolt: [])
+        #expect(layout.isPresent)
+        #expect(layout.serialNumber == "11AD1D0AB7B17E08371B0B00")
+        #expect(layout.ethernetInterface == nil)
+        #expect(layout.thunderbolt.map { $0.devices.map(\.name) } == [[], ["Keychron 4K Link"], ["USB-C Display Adapter"]])
+        #expect(layout.thunderbolt[2].devices.first?.detail == "Alternate mode · Chrontel")
+        #expect(layout.usbA.map { $0.devices.map(\.name) } == [["Logitech USB Receiver"]])
+    }
+
+    @Test("Each model only finds its own dock")
+    func absentDock() {
+        #expect(!T.layout(model: .satechiSlimHubPro, usb: razerTree, thunderbolt: []).isPresent)
+        #expect(!T.layout(model: .razerThunderbolt4, usb: satechiTree, thunderbolt: []).isPresent)
+        let empty = T.layout(model: .razerThunderbolt4, usb: [usb(1, parent: nil, 0x0100_0000, "Keyboard")], thunderbolt: [])
+        #expect(!empty.isPresent)
+        #expect(empty.usbA.allSatisfy { $0.devices.isEmpty })
+    }
+}
+
+// MARK: - MX Gestures
+
+@Suite("MX Master hold-and-drag gesture recognition")
+struct MXGestureTrackerTests {
+    private let thumb: UInt16 = 0x00C3
+    private let panel: UInt16 = 0x01A0
+
+    @Test("Releasing with only a little wobble is a click")
+    func smallWobbleIsClick() {
+        var tracker = MXGestureTracker()
+        tracker.press(thumb)
+        tracker.move(dx: 10, dy: -12)
+        #expect(tracker.release(thumb, threshold: 100) == .click)
+    }
+
+    @Test("Direction comes from the dominant axis of the whole drag", arguments: [
+        (0, -150, MXGestureTracker.Direction.up),
+        (0, 150, .down),
+        (-150, 0, .left),
+        (150, 0, .right)
+    ])
+    func directions(dx: Int, dy: Int, expected: MXGestureTracker.Direction) {
+        var tracker = MXGestureTracker()
+        tracker.press(thumb)
+        tracker.move(dx: dx, dy: dy)
+        #expect(tracker.release(thumb, threshold: 100) == .gesture(expected))
+    }
+
+    @Test("A drag that starts sideways but ends mostly upward is an up gesture")
+    func curvedDragUsesTotal() {
+        var tracker = MXGestureTracker()
+        tracker.press(thumb)
+        tracker.move(dx: 60, dy: 0)
+        tracker.move(dx: 20, dy: -200)
+        #expect(tracker.release(thumb, threshold: 50) == .gesture(.up))
+    }
+
+    @Test("Only the control that started the hold ends it")
+    func otherControlIgnored() {
+        var tracker = MXGestureTracker()
+        tracker.press(thumb)
+        tracker.press(panel)
+        tracker.move(dx: 0, dy: 200)
+        #expect(tracker.release(panel, threshold: 100) == .none)
+        #expect(tracker.release(thumb, threshold: 100) == .gesture(.down))
+    }
+
+    @Test("Motion without a held control and a cancelled hold are ignored")
+    func motionAndCancel() {
+        var tracker = MXGestureTracker()
+        tracker.move(dx: 500, dy: 0)
+        tracker.press(panel)
+        #expect(tracker.release(panel, threshold: 100) == .click)
+
+        tracker.press(thumb)
+        tracker.move(dx: 500, dy: 0)
+        tracker.cancel()
+        #expect(tracker.release(thumb, threshold: 100) == .none)
+    }
+}
+
+// MARK: - MX Onboard Memory
+
+@Suite("MX Master button remaps saved to the mouse")
+struct MXMouseMemoryTests {
+    @Test("Remap packet leaves diversion alone and names the target control")
+    func remapPacket() {
+        let packet = HIDPPProtocol.setControlRemapPacket(deviceIndex: 0x01, featureIndex: 0x09, controlID: 0x00C3, target: 0x0053)
+        #expect(Array(packet[0...8]) == [0x11, 0x01, 0x09, 0x3A, 0x00, 0xC3, 0x00, 0x00, 0x53])
+    }
+
+    @Test("Remap read-back treats a zero target as not remapped")
+    func remapReadBack() {
+        var reply = [UInt8](repeating: 0, count: 20)
+        reply[4] = 0x00; reply[5] = 0xC3
+        #expect(HIDPPProtocol.parseControlRemap(reply, controlID: 0x00C3) == 0x00C3)
+        reply[7] = 0x00; reply[8] = 0x53
+        #expect(HIDPPProtocol.parseControlRemap(reply, controlID: 0x00C3) == 0x0053)
+        #expect(HIDPPProtocol.parseControlRemap(reply, controlID: 0x0052) == nil)
+    }
+
+    @Test("A control can only be remapped onto a group in its mask")
+    func remapGroups() {
+        let thumb = HIDPPProtocol.ControlInfo(cid: 0x00C3, flags: 0x30, group: 3, groupMask: 0b0011)
+        let back = HIDPPProtocol.ControlInfo(cid: 0x0053, flags: 0x30, group: 2, groupMask: 0b0011)
+        let shift = HIDPPProtocol.ControlInfo(cid: 0x00C4, flags: 0x30, group: 4, groupMask: 0)
+        let fixed = HIDPPProtocol.ControlInfo(cid: 0x0052, flags: 0x20, group: 1, groupMask: 0b0011)
+        #expect(thumb.canRemap(to: back))
+        #expect(!thumb.canRemap(to: shift))
+        #expect(!fixed.canRemap(to: back))
+        #expect(fixed.canRemap(to: fixed))
+    }
+
+    @Test("Only Back, Forward and the wheel-mode toggle have native controls")
+    func nativeControls() {
+        #expect(MXMasterManager.nativeControl(for: .navigateBack) == HIDPPProtocol.cidBackButton)
+        #expect(MXMasterManager.nativeControl(for: .navigateForward) == HIDPPProtocol.cidForwardButton)
+        #expect(MXMasterManager.nativeControl(for: .toggleWheelMode) == HIDPPProtocol.cidModeShiftButton)
+        #expect(MXMasterManager.nativeControl(for: .missionControl) == nil)
     }
 }

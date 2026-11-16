@@ -1,25 +1,61 @@
 import SwiftUI
 import IOKit.hid
 
-// MARK: - MXMechanicalConnector
+// MARK: - MXKeyboardConnector
 
-/// Logitech MX Mechanical keyboards (e.g. MX Mechanical Mini for Mac) on a Logi Bolt or Unifying receiver.
+/// Logitech MX keyboards (MX Mechanical, MX Keys Mini) on a Logi Bolt or Unifying receiver. Both speak the
+/// same HID++ features (backlight, Fn inversion, reprogrammable F-keys), so one connector serves each model.
 /// Bolt receivers host several devices, so every slot's pairing record is checked and the keyboard is found by
 /// name. The receiver answers for the keyboard while it sleeps; once awake, its full name and battery come
 /// over HID++. Event-driven: receiver attach/detach, the receiver reporting the keyboard waking or sleeping,
 /// and battery changes the keyboard pushes on its own.
 @Observable
 @MainActor
-final class MXMechanicalConnector {
-    static let shared = MXMechanicalConnector()
+final class MXKeyboardConnector {
+    static let mxMechanical = MXKeyboardConnector(model: .mxMechanical)
+    static let mxKeysMini = MXKeyboardConnector(model: .mxKeysMini)
 
     nonisolated static let receiverIDs = [HIDPPProtocol.boltReceiverProductID, HIDPPProtocol.unifyingReceiverProductID]
 
+    /// The supported keyboards and how each is told apart on a receiver.
+    enum Model: Sendable {
+        case mxMechanical
+        case mxKeysMini
+
+        var id: String {
+            switch self {
+            case .mxMechanical: return "logitech.mx-mechanical"
+            case .mxKeysMini: return "logitech.mx-keys-mini"
+            }
+        }
+
+        var displayName: String {
+            switch self {
+            case .mxMechanical: return "MX Mechanical"
+            case .mxKeysMini: return "MX Keys Mini"
+            }
+        }
+
+        /// Prefix for settings saved per keyboard.
+        var defaultsPrefix: String {
+            switch self {
+            case .mxMechanical: return "mxMechanical"
+            case .mxKeysMini: return "mxKeysMini"
+            }
+        }
+
+        nonisolated func matches(_ name: String) -> Bool {
+            switch self {
+            case .mxMechanical: return MXKeyboardConnector.isMXMechanical(name)
+            case .mxKeysMini: return MXKeyboardConnector.isMXKeysMini(name)
+            }
+        }
+    }
+
+    let model: Model
+
     /// Finds the keyboard in any slot of any Bolt or Unifying receiver, and follows its name, wake state and battery.
-    @ObservationIgnored let device = HIDPPReceiverDevice(
-        productIDs: receiverIDs, slots: 1...6, alertID: "logitech.mx-mechanical",
-        matches: { $0.kind == .keyboard && isMXMechanical($0.name) }
-    )
+    @ObservationIgnored let device: HIDPPReceiverDevice
 
     var deviceName: String? { device.deviceName }
     /// The keyboard is awake and answering; false while it sleeps (the receiver still knows it's paired).
@@ -49,12 +85,23 @@ final class MXMechanicalConnector {
     @ObservationIgnored private var pendingBacklight: HIDPPProtocol.BacklightConfig?
     @ObservationIgnored private var isWritingBacklight = false
 
-    private init() {}
+    private init(model: Model) {
+        self.model = model
+        device = HIDPPReceiverDevice(
+            productIDs: Self.receiverIDs, slots: 1...6, alertID: model.id,
+            matches: { $0.kind == .keyboard && model.matches($0.name) }
+        )
+    }
 
     /// The receiver abbreviates the name (e.g. "MX MCHNCL M"); the keyboard itself reports it in full.
     nonisolated static func isMXMechanical(_ name: String) -> Bool {
         let lower = name.lowercased()
         return lower.contains("mx mchncl") || lower.contains("mx mechanical")
+    }
+
+    /// A Bolt receiver reports the MX Keys Mini by its full name.
+    nonisolated static func isMXKeysMini(_ name: String) -> Bool {
+        name.lowercased().contains("mx keys mini")
     }
 
     // MARK: Lifecycle
@@ -156,7 +203,7 @@ final class MXMechanicalConnector {
     }
 
     private var savedKeyActions: [Int: AccessoryButtonAction] {
-        guard let name = deviceName, let data = UserDefaults.standard.data(forKey: "mxMechanical.\(name).keyActions"),
+        guard let name = deviceName, let data = UserDefaults.standard.data(forKey: "\(model.defaultsPrefix).\(name).keyActions"),
               let stored = try? JSONDecoder().decode([String: AccessoryButtonAction].self, from: data) else { return [:] }
         return Dictionary(uniqueKeysWithValues: stored.compactMap { key, action in Int(key).map { ($0, action) } })
     }
@@ -165,7 +212,7 @@ final class MXMechanicalConnector {
         guard let name = deviceName else { return }
         let stored = Dictionary(uniqueKeysWithValues: keyActions.map { (String($0.key), $0.value) })
         if let data = try? JSONEncoder().encode(stored) {
-            UserDefaults.standard.set(data, forKey: "mxMechanical.\(name).keyActions")
+            UserDefaults.standard.set(data, forKey: "\(model.defaultsPrefix).\(name).keyActions")
         }
     }
 
@@ -246,9 +293,9 @@ final class MXMechanicalConnector {
 
 // MARK: - AccessoryConnector
 
-extension MXMechanicalConnector: AccessoryConnector {
-    var id: String { "logitech.mx-mechanical" }
-    var displayName: String { "MX Mechanical" }
+extension MXKeyboardConnector: AccessoryConnector {
+    var id: String { model.id }
+    var displayName: String { model.displayName }
     var systemImage: String { "keyboard" }
 
     var isAvailable: Bool { deviceName != nil }
@@ -276,16 +323,16 @@ extension MXMechanicalConnector: AccessoryConnector {
     func setCardVisible(_ visible: Bool) {}
 
     func makeSettingsView() -> AnyView {
-        AnyView(MXMechanicalSettingsView(connector: self))
+        AnyView(MXKeyboardSettingsView(connector: self))
     }
 }
 
 // MARK: - Settings Sections
 
-/// The MX Mechanical page: keyboard-specific sections only. The Accessories tab adds the device section and
+/// The MX keyboard page: keyboard-specific sections only. The Accessories tab adds the device section and
 /// battery alerts, and disables everything while the keyboard isn't connected.
-private struct MXMechanicalSettingsView: View {
-    let connector: MXMechanicalConnector
+private struct MXKeyboardSettingsView: View {
+    let connector: MXKeyboardConnector
 
     private static let durations = [5, 10, 15, 30, 45, 60, 90, 120, 180, 300]
 
@@ -318,7 +365,7 @@ private struct MXMechanicalSettingsView: View {
     }
 
     /// The symbol printed on a key, from its own function. Logitech task numbers, read from an
-    /// MX Mechanical Mini for Mac.
+    /// MX Mechanical Mini for Mac and an MX Keys Mini.
     private static func symbol(for control: HIDPPProtocol.KeyControl) -> String? {
         switch control.task {
         case 0x00AE: return "1.circle"           // Easy-Switch 1
@@ -332,7 +379,10 @@ private struct MXMechanicalSettingsView: View {
         case 0x00F1: return "mic.slash"          // Mute microphone
         case 0x00B1: return "magnifyingglass"    // Search
         case 0x00FD: return "playpause"          // Play / pause
+        case 0x0004: return "playpause"          // Play / pause (MX Keys Mini)
         case 0x0003: return "speaker.slash"      // Mute
+        case 0x0002: return "speaker.wave.1"     // Volume down
+        case 0x0001: return "speaker.wave.3"     // Volume up
         default: return nil
         }
     }
@@ -341,15 +391,18 @@ private struct MXMechanicalSettingsView: View {
         SettingsSection(title: "Backlight", footer: "Battery saving turns the backlight off below 10% battery. The keyboard's own backlight keys still work.") {
             Toggle("Backlight", isOn: binding(backlight, \.isEnabled))
             Group {
-                Picker("Effect", selection: Binding(
-                    get: { connector.backlightEffect },
-                    set: { if let effect = $0 { connector.setBacklightEffect(effect) } }
-                )) {
-                    if connector.backlightEffect == nil {
-                        Text("Not set").tag(HIDPPProtocol.BacklightEffect?.none)
-                    }
-                    ForEach(HIDPPProtocol.BacklightEffect.allCases) { effect in
-                        Text(effect.title).tag(Optional(effect))
+                // The MX Keys Mini only has a static backlight, so there's nothing to pick.
+                if backlight.supportedEffects.count > 1 {
+                    Picker("Effect", selection: Binding(
+                        get: { connector.backlightEffect },
+                        set: { if let effect = $0 { connector.setBacklightEffect(effect) } }
+                    )) {
+                        if connector.backlightEffect == nil {
+                            Text("Not set").tag(HIDPPProtocol.BacklightEffect?.none)
+                        }
+                        ForEach(backlight.supportedEffects) { effect in
+                            Text(effect.title).tag(Optional(effect))
+                        }
                     }
                 }
                 Toggle("Automatic brightness", isOn: binding(backlight, \.isAutomaticBrightness))

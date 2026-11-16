@@ -64,7 +64,8 @@ public final class WattageManager {
         }
     }
 
-    /// Starts polling power metrics. Only called while the menu bar popover is open.
+    /// Starts polling power metrics. Only called while something shows the readings: the open popover or a menu
+    /// bar stat.
     public func startMonitoring() {
         guard isSupported else { return }
         guard !isMonitoring else { return }
@@ -74,15 +75,19 @@ public final class WattageManager {
         samplePower()
 
         timer?.invalidate()
-        timer = Timer.scheduledTimer(withTimeInterval: SMCConnection.pollInterval, repeats: true) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                guard let self = self, self.isMonitoring else { return }
+        // Scheduled on the main run loop, so each tick runs on the main actor directly.
+        let timer = Timer.scheduledTimer(withTimeInterval: SMCConnection.pollInterval, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, self.isMonitoring else { return }
                 self.samplePower()
             }
         }
+        // Lets macOS batch the wakeup with other work; a reading a moment late doesn't matter.
+        timer.tolerance = SMCConnection.pollTolerance
+        self.timer = timer
     }
 
-    /// Stops polling immediately to consume zero CPU when the popover is closed.
+    /// Stops polling immediately, so nothing runs while no readings are shown.
     public func stopMonitoring() {
         guard isMonitoring else { return }
         isMonitoring = false

@@ -35,6 +35,10 @@ protocol AccessoryConnector: AnyObject {
     var isAwake: Bool { get }
     var batteryPercent: Int? { get }
     var isCharging: Bool { get }
+    /// The device runs on a battery, so Settings shows the shared battery alert. Defaults to true.
+    var hasBattery: Bool { get }
+    /// The device is reached through IOHIDManager, which needs Input Monitoring. Defaults to true.
+    var needsInputMonitoring: Bool { get }
 
     /// Called once at launch: register device callbacks and open the hardware.
     func start()
@@ -54,17 +58,24 @@ protocol AccessoryConnector: AnyObject {
     func makeSettingsView() -> AnyView
 }
 
+extension AccessoryConnector {
+    var hasBattery: Bool { true }
+    var needsInputMonitoring: Bool { true }
+}
+
 /// How an accessory reaches the Mac.
 enum AccessoryConnection: Equatable {
     case bluetooth
     case receiver
     case usbCable
+    case thunderbolt
 
     var title: String {
         switch self {
         case .bluetooth: return "Bluetooth"
         case .receiver: return "USB Receiver"
         case .usbCable: return "USB Cable"
+        case .thunderbolt: return "Thunderbolt"
         }
     }
 }
@@ -77,8 +88,12 @@ enum AccessoryRegistry {
     static let connectors: [any AccessoryConnector] = [
         MXMasterManager.shared,
         LogitechGConnector.shared,
-        MXMechanicalConnector.shared,
+        MXKeyboardConnector.mxMechanical,
+        MXKeyboardConnector.mxKeysMini,
         LogitechG515Connector.shared,
+        KeychronM3MiniConnector.shared,
+        RazerDockConnector.shared,
+        SatechiHubConnector.shared,
     ]
 
     static var available: [any AccessoryConnector] {
@@ -227,7 +242,7 @@ struct AccessoriesSettingsTabView: View {
         VStack(spacing: 0) {
             if connectors.count > 1 {
                 AccessorySelector(connectors: connectors, selectedID: selected?.id) { selectedID = $0 }
-                    .padding(.bottom, 8)
+                    .padding(.bottom, 4)
             }
 
             Form {
@@ -239,7 +254,9 @@ struct AccessoriesSettingsTabView: View {
                 } else {
                     ContentUnavailableView("No Supported Accessories", systemImage: "cable.connector")
                 }
-                batteryAlertSection
+                if selected?.hasBattery ?? true {
+                    batteryAlertSection
+                }
             }
             .formStyle(.grouped)
         }
@@ -264,7 +281,7 @@ struct AccessoriesSettingsTabView: View {
             if let percent = connector.batteryPercent {
                 LabeledContent("Battery", value: connector.isCharging ? "\(percent)% · Charging" : "\(percent)%")
             }
-            if !InputMonitoringPermission.isGranted {
+            if connector.needsInputMonitoring && !InputMonitoringPermission.isGranted {
                 PermissionNotice(
                     message: "Input Monitoring is needed to talk to the device.",
                     buttonTitle: "Open Settings…",
@@ -290,33 +307,193 @@ struct AccessoriesSettingsTabView: View {
     }
 }
 
-/// Segmented selector for accessories. Each shows a status dot, and is dimmed while not connected.
+/// Accessory tiles, like the display picker in System Settings: an icon tile per accessory with its name and a
+/// status dot below. Accessories that aren't connected are dimmed. Once the row no longer fits it scrolls
+/// sideways, like the shelves in the App Store: with a trackpad, with a mouse wheel while the pointer is over the
+/// row, or with the chevrons at its ends.
 private struct AccessorySelector: View {
     let connectors: [any AccessoryConnector]
     let selectedID: String?
     let onSelect: (String) -> Void
 
+    @State private var isHovering = false
+    @State private var isAtStart = true
+    @State private var isAtEnd = false
+
     var body: some View {
-        HStack(spacing: 4) {
+        ViewThatFits(in: .horizontal) {
+            tiles
+            scrollingTiles
+        }
+    }
+
+    private var tiles: some View {
+        HStack(spacing: 6) {
             ForEach(connectors, id: \.id) { connector in
-                let isSelected = connector.id == selectedID
-                Button {
+                AccessoryTile(connector: connector, isSelected: connector.id == selectedID) {
                     onSelect(connector.id)
-                } label: {
-                    HStack(spacing: 6) {
-                        StatusDot(isActive: connector.isAvailable && connector.isAwake)
-                        Text(connector.displayName)
-                    }
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 5)
-                    .background(isSelected ? Color.accentColor.opacity(0.18) : Color.clear, in: Capsule())
-                    .contentShape(Capsule())
                 }
-                .buttonStyle(.plain)
-                .opacity(connector.isAvailable ? 1 : 0.45)
-                .accessibilityAddTraits(isSelected ? .isSelected : [])
-                .accessibilityValue(connector.isAvailable ? "Connected" : "Not connected")
+                .id(connector.id)
             }
         }
+        .padding(.vertical, 2)
+    }
+
+    private var scrollingTiles: some View {
+        ScrollViewReader { proxy in
+            ScrollView(.horizontal) {
+                tiles
+                    .padding(.horizontal, 28)
+            }
+            .scrollIndicators(.never)
+            .modifier(ScrollEdgeTracker(isAtStart: $isAtStart, isAtEnd: $isAtEnd))
+            .onHover { isHovering = $0 }
+            .modifier(VerticalWheelScrollsHorizontally(isActive: isHovering))
+            .overlay(alignment: .leading) {
+                if !isAtStart {
+                    chevron("chevron.left", label: "Scroll Left") {
+                        if let first = connectors.first { proxy.scrollTo(first.id, anchor: .leading) }
+                    }
+                }
+            }
+            .overlay(alignment: .trailing) {
+                if !isAtEnd {
+                    chevron("chevron.right", label: "Scroll Right") {
+                        if let last = connectors.last { proxy.scrollTo(last.id, anchor: .trailing) }
+                    }
+                }
+            }
+            .onAppear {
+                // Show the selected accessory, even when it's past the visible part of the row.
+                if let selectedID { proxy.scrollTo(selectedID, anchor: .center) }
+            }
+        }
+    }
+
+    private func chevron(_ systemImage: String, label: String, action: @escaping () -> Void) -> some View {
+        Button {
+            withAnimation(.easeInOut(duration: 0.25), action)
+        } label: {
+            Image(systemName: systemImage)
+                .font(.system(size: 11, weight: .semibold))
+                .frame(width: 22, height: 22)
+                .background(.regularMaterial, in: Circle())
+                .overlay(Circle().strokeBorder(Color.primary.opacity(0.1), lineWidth: 0.5))
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, 2)
+        .help(label)
+        .accessibilityLabel(label)
+    }
+}
+
+/// Follows whether a scroll view is scrolled to either end, so the chevrons can hide there. Needs macOS 15;
+/// on earlier versions both chevrons stay visible.
+private struct ScrollEdgeTracker: ViewModifier {
+    @Binding var isAtStart: Bool
+    @Binding var isAtEnd: Bool
+
+    func body(content: Content) -> some View {
+        if #available(macOS 15.0, *) {
+            content.onScrollGeometryChange(for: [Bool].self) { geometry in
+                let offset = geometry.contentOffset.x + geometry.contentInsets.leading
+                let maxOffset = geometry.contentSize.width - geometry.containerSize.width
+                return [offset <= 1, offset >= maxOffset - 1]
+            } action: { _, edges in
+                isAtStart = edges[0]
+                isAtEnd = edges[1]
+            }
+        } else {
+            content
+        }
+    }
+}
+
+/// While active, turns vertical scroll-wheel movement into horizontal scrolling. macOS only scrolls a horizontal
+/// scroll view with Shift held or a sideways swipe, so this lets a plain mouse wheel move the row too. The event's
+/// axes are swapped before it's delivered, so the scroll view keeps its own smooth scrolling and momentum.
+private struct VerticalWheelScrollsHorizontally: ViewModifier {
+    let isActive: Bool
+
+    @State private var monitor: Any?
+
+    func body(content: Content) -> some View {
+        content
+            .onChange(of: isActive, initial: true) { _, active in
+                if active { install() } else { remove() }
+            }
+            .onDisappear { remove() }
+    }
+
+    private func install() {
+        guard monitor == nil else { return }
+        monitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { event in
+            Self.swappingAxes(of: event) ?? event
+        }
+    }
+
+    private func remove() {
+        if let monitor { NSEvent.removeMonitor(monitor) }
+        monitor = nil
+    }
+
+    /// The same event scrolling sideways, or nil if it already scrolls sideways (or can't be rewritten).
+    private static func swappingAxes(of event: NSEvent) -> NSEvent? {
+        guard abs(event.scrollingDeltaY) > abs(event.scrollingDeltaX), let copy = event.cgEvent?.copy() else { return nil }
+        // Line and pixel deltas are integer fields; the fixed-point delta is fractional.
+        for (vertical, horizontal) in [(CGEventField.scrollWheelEventDeltaAxis1, CGEventField.scrollWheelEventDeltaAxis2),
+                                       (.scrollWheelEventPointDeltaAxis1, .scrollWheelEventPointDeltaAxis2)] {
+            copy.setIntegerValueField(horizontal, value: copy.getIntegerValueField(vertical))
+            copy.setIntegerValueField(vertical, value: 0)
+        }
+        copy.setDoubleValueField(.scrollWheelEventFixedPtDeltaAxis2, value: copy.getDoubleValueField(.scrollWheelEventFixedPtDeltaAxis1))
+        copy.setDoubleValueField(.scrollWheelEventFixedPtDeltaAxis1, value: 0)
+        return NSEvent(cgEvent: copy)
+    }
+}
+
+private struct AccessoryTile: View {
+    let connector: any AccessoryConnector
+    let isSelected: Bool
+    let action: () -> Void
+
+    private var isActive: Bool { connector.isAvailable && connector.isAwake }
+
+    var body: some View {
+        Button(action: action) {
+            VStack(spacing: 6) {
+                Image(systemName: connector.systemImage)
+                    .font(.system(size: 20, weight: .regular))
+                    .foregroundStyle(isSelected ? Color.accentColor : Color.primary)
+                    .frame(width: 60, height: 42)
+                    .background(
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .fill(isSelected ? Color.accentColor.opacity(0.15) : Color.primary.opacity(0.05))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .strokeBorder(isSelected ? Color.accentColor : Color.primary.opacity(0.1),
+                                          lineWidth: isSelected ? 1.5 : 0.5)
+                    )
+
+                HStack(spacing: 4) {
+                    StatusDot(isActive: isActive)
+                    Text(connector.displayName)
+                        .font(.system(size: 11, weight: isSelected ? .semibold : .regular))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.85)
+                }
+                .frame(maxWidth: 82)
+            }
+            .frame(width: 84)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .opacity(connector.isAvailable ? 1 : 0.45)
+        .help(connector.isAvailable ? connector.accessoryName : "\(connector.displayName) · Not connected")
+        .accessibilityLabel(connector.displayName)
+        .accessibilityValue(connector.isAvailable ? "Connected" : "Not connected")
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
     }
 }

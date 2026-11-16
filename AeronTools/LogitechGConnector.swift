@@ -252,7 +252,7 @@ final class LogitechGConnector {
         }
     }
 
-    /// Writes DPI, report rate and triggers into the first onboard profile. Only those bytes change; the sector
+    /// Writes DPI, report rate, triggers and side buttons into the first onboard profile. Only those bytes change; the sector
     /// must verify before it's touched, is read back after writing, and is restored if the read-back differs.
     private func saveToOnboardProfile() async {
         guard let session, let index = onboardFeatureIndex else { return }
@@ -284,7 +284,9 @@ final class LogitechGConnector {
             profileSaveState = .failed("Couldn't read the onboard profile.")
             return
         }
-        let settings = HIDPPProtocol.ProfileSettings(dpi: dpi, reportRateHz: reportRateHz, triggers: triggerSettings)
+        let settings = HIDPPProtocol.ProfileSettings(
+            dpi: dpi, reportRateHz: reportRateHz, triggers: triggerSettings, buttonBindings: onboardButtonBindings()
+        )
         guard let patched = HIDPPProtocol.patchedProfileSector(original, with: settings) else {
             profileSaveState = .failed("The onboard profile didn't pass its checksum, so it was left untouched.")
             return
@@ -305,6 +307,23 @@ final class LogitechGConnector {
             profileSaveState = .failed("Saving to the mouse didn't verify, so its profile was restored.")
             dlog("Logitech G: onboard profile write failed verification; original restored")
         }
+    }
+
+    /// What the side buttons do from the onboard profile, once the app has quit: an action that's a plain shortcut
+    /// is stored as its keys (this Mac's shortcut for it), anything else as the normal back or forward button.
+    /// While the app runs the mouse is in host mode, where the profile's buttons don't apply and the app
+    /// performs every action itself.
+    private func onboardButtonBindings() -> [Int: [UInt8]] {
+        guard buttonCount >= HIDPPProtocol.forwardSideButton, let buttons = sideButtons ?? savedSideButtons else { return [:] }
+        var bindings: [Int: [UInt8]] = [:]
+        for (button, action) in [(HIDPPProtocol.backSideButton, buttons.back), (HIDPPProtocol.forwardSideButton, buttons.forward)] {
+            if let key = AccessoryActions.shortcut(for: action)?.hidKey {
+                bindings[button] = HIDPPProtocol.keyBinding(usage: key.usage, modifiers: key.modifiers)
+            } else {
+                bindings[button] = HIDPPProtocol.mouseButtonBinding(button)
+            }
+        }
+        return bindings
     }
 
     private func readSector(_ sector: UInt16, size: Int, session: HIDPPSession, index: UInt8) async -> [UInt8]? {
@@ -367,6 +386,7 @@ final class LogitechGConnector {
             guard self.session === session, applied else { return }
             self.lastButtonMask = 0
             self.sideButtons = buttons
+            self.scheduleProfileSave()
         }
     }
 
@@ -573,7 +593,7 @@ private struct LogitechGSettingsView: View {
     }
 
     private var onboardMemorySection: some View {
-        SettingsSection(title: "Onboard Memory", footer: "Saves DPI, report rate and triggers to the mouse a few seconds after a change, so it keeps them without Aeron Tools. Side button actions always need the app.") {
+        SettingsSection(title: "Onboard Memory", footer: "Saves DPI, report rate, triggers and side buttons to the mouse a few seconds after a change, so it keeps them without Aeron Tools. Side buttons set to a shortcut action (Back, Mission Control, Copy…) keep sending it; other actions, like Caffeine, need the app and go back to normal back and forward without it.") {
             Toggle("Save settings to the mouse", isOn: Binding(
                 get: { connector.savesToOnboardProfile },
                 set: { connector.savesToOnboardProfile = $0 }
