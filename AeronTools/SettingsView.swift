@@ -5,6 +5,7 @@ import ServiceManagement
 public struct SettingsView: View {
     @Bindable var model = DisplayStateModel.shared
     @Bindable var wireless = WirelessDisplayManager.shared
+    @Bindable var gameMode = GameModeManager.shared
     @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
     @State private var loginItemNeedsApproval = SMAppService.mainApp.status == .requiresApproval
     private var accessibilityPermission = AccessibilityPermission.shared
@@ -49,6 +50,7 @@ public struct SettingsView: View {
             // Later changes (e.g. returning from System Settings) are picked up when the app reactivates.
             wireless.refreshPermissions()
             wireless.refreshNetworkInterfaces()
+            await gameMode.refreshStatus()
         }
     }
 
@@ -107,6 +109,41 @@ public struct SettingsView: View {
                         buttonTitle: "Open Login Items…",
                         action: { SMAppService.openSystemSettingsLoginItems() }
                     )
+                }
+            }
+
+            SettingsSection(title: "Window Behavior", footer: "Automatically quits an app when its last window is closed. Finder and menu bar apps are excluded.") {
+                Toggle("Quit app when last window closes", isOn: $model.quitAppOnLastWindowClosed)
+                if model.quitAppOnLastWindowClosed && !accessibilityPermission.isGranted {
+                    PermissionNotice(
+                        message: "Accessibility is needed to detect when apps close their last window.",
+                        buttonTitle: "Open Settings…",
+                        action: accessibilityPermission.openSystemSettings
+                    )
+                }
+            }
+
+            SettingsSection(title: "Game Mode", footer: "Forces macOS Game Mode on to prioritize CPU and GPU access and lower Bluetooth and AirPods latency.") {
+                LabeledContent {
+                    HStack(spacing: 8) {
+                        if gameMode.status?.policy != .automatic && gameMode.status != nil {
+                            Button("Automatic") {
+                                gameMode.setPolicy(.automatic)
+                            }
+                            .disabled(gameMode.isUpdating)
+                        }
+                        Button(gameMode.isForcedOn ? "Forced On" : "Force Game Mode On") {
+                            gameMode.toggleForcedOn()
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(gameMode.isForcedOn ? .green : .accentColor)
+                        .disabled(gameMode.isUpdating)
+                    }
+                } label: {
+                    HStack(spacing: 8) {
+                        StatusDot(isActive: gameMode.isGameModeActive)
+                        Text(gameMode.statusText)
+                    }
                 }
             }
 

@@ -6,6 +6,7 @@ import AppKit
 public struct ContentView: View {
     @Bindable var model = DisplayStateModel.shared
     @Bindable var wireless = WirelessDisplayManager.shared
+    @Bindable var gameMode = GameModeManager.shared
 
     public init() {}
 
@@ -26,6 +27,33 @@ public struct ContentView: View {
                 }
 
                 Spacer()
+
+                // Game Mode: click forces Game Mode on (or restores automatic), menu shows status and policy options.
+                Menu {
+                    Section("Game Mode (\(gameMode.statusText))") {
+                        Button("Force Game Mode On") {
+                            gameMode.forceGameModeOn()
+                        }
+                        Button("Automatic") {
+                            gameMode.setPolicy(.automatic)
+                        }
+                        Button("Force Off") {
+                            gameMode.setPolicy(.forcedOff)
+                        }
+                    }
+                } label: {
+                    Image(systemName: gameMode.isGameModeActive ? "gamecontroller.fill" : "gamecontroller")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(gameMode.isGameModeActive ? Color.green : Color.secondary)
+                } primaryAction: {
+                    gameMode.toggleForcedOn()
+                }
+                .menuStyle(.button)
+                .buttonStyle(.plain)
+                .fixedSize()
+                .padding(.horizontal, 5)
+                .padding(.vertical, 4)
+                .help(gameModeHelp)
 
                 // Caffeine: click toggles, the menu offers timed sessions.
                 Menu {
@@ -54,10 +82,6 @@ public struct ContentView: View {
                 .fixedSize()
                 .padding(.horizontal, 5)
                 .padding(.vertical, 4)
-                .background(
-                    RoundedRectangle(cornerRadius: 6, style: .continuous)
-                        .fill(model.isCaffeineActive ? Color.orange.opacity(0.18) : Color.clear)
-                )
                 .help(caffeineHelp)
 
                 // Settings Button
@@ -118,10 +142,17 @@ public struct ContentView: View {
             }
 
             // Quick Options Footer
-            FooterSection(model: model)
+            FooterSection(model: model, gameMode: gameMode)
         }
         .padding(14)
         .frame(width: 320)
+    }
+
+    private var gameModeHelp: String {
+        if gameMode.isForcedOn {
+            return "Game Mode: \(gameMode.statusText) – click to restore automatic"
+        }
+        return "Game Mode: \(gameMode.statusText) – click to force Game Mode on"
     }
 
     private var caffeineHelp: String {
@@ -142,6 +173,7 @@ public struct ContentView: View {
 
 private struct FooterSection: View {
     @Bindable var model: DisplayStateModel
+    @Bindable var gameMode: GameModeManager
 
     /// Timed caffeine is rendered separately as a system-driven countdown, so this only covers the static states.
     private var caffeineStatus: String? {
@@ -156,6 +188,12 @@ private struct FooterSection: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
+            if gameMode.isGameModeActive {
+                Label("Game Mode: \(gameMode.statusText)", systemImage: "gamecontroller.fill")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.green)
+            }
+
             if model.isCaffeinated, let end = model.caffeineEndDate {
                 // Text(timerInterval:) is updated by the system, so the popover never re-renders to tick.
                 Label {

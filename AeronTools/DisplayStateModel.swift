@@ -61,6 +61,13 @@ public final class DisplayStateModel {
         }
     }
 
+    public var quitAppOnLastWindowClosed: Bool {
+        didSet {
+            UserDefaults.standard.set(quitAppOnLastWindowClosed, forKey: "quitAppOnLastWindowClosed")
+            LastWindowQuitController.shared.setEnabled(quitAppOnLastWindowClosed)
+        }
+    }
+
     public var switchAudioToMonitor: Bool {
         didSet { UserDefaults.standard.set(switchAudioToMonitor, forKey: "switchAudioToMonitor") }
     }
@@ -245,6 +252,7 @@ public final class DisplayStateModel {
         self.autoTurnOffBuiltin = defaults.bool(forKey: "autoTurnOffBuiltin")
         self.turnOffKeyboardWithScreen = defaults.bool(forKey: "turnOffKeyboardWithScreen")
         self.mediaKeysControlPointerDisplay = defaults.object(forKey: "mediaKeysControlPointerDisplay") as? Bool ?? true
+        self.quitAppOnLastWindowClosed = defaults.bool(forKey: "quitAppOnLastWindowClosed")
         self.switchAudioToMonitor = defaults.object(forKey: "switchAudioToMonitor") as? Bool ?? true
         self.showMenuBarIcon = defaults.object(forKey: "showMenuBarIcon") as? Bool ?? true
         self.showDockIcon = defaults.object(forKey: "showDockIcon") as? Bool ?? false

@@ -1,3 +1,4 @@
+import AppKit
 import Carbon.HIToolbox
 import Foundation
 import Testing
@@ -1115,3 +1116,97 @@ struct MXMouseMemoryTests {
         #expect(MXMasterManager.nativeControl(for: .missionControl) == nil)
     }
 }
+
+// MARK: - Last Window Quit
+
+@Suite("Quit app when last window closes eligibility and window filtering")
+struct LastWindowQuitTests {
+    @Test("Only active regular apps outside Finder and Aeron Tools are tracked")
+    func applicationEligibility() {
+        #expect(LastWindowQuitController.shouldTrackApplication(
+            bundleIdentifier: "com.apple.Safari",
+            activationPolicy: .regular,
+            isTerminated: false,
+            isCurrentProcess: false
+        ))
+        #expect(!LastWindowQuitController.shouldTrackApplication(
+            bundleIdentifier: "com.apple.finder",
+            activationPolicy: .regular,
+            isTerminated: false,
+            isCurrentProcess: false
+        ))
+        #expect(!LastWindowQuitController.shouldTrackApplication(
+            bundleIdentifier: "com.example.menubar",
+            activationPolicy: .accessory,
+            isTerminated: false,
+            isCurrentProcess: false
+        ))
+        #expect(!LastWindowQuitController.shouldTrackApplication(
+            bundleIdentifier: "com.apple.Safari",
+            activationPolicy: .regular,
+            isTerminated: true,
+            isCurrentProcess: false
+        ))
+        #expect(!LastWindowQuitController.shouldTrackApplication(
+            bundleIdentifier: "com.aeron.AeronTools",
+            activationPolicy: .regular,
+            isTerminated: false,
+            isCurrentProcess: true
+        ))
+    }
+
+    @Test("Standard and dialog windows qualify while sheets, popovers and non-windows do not")
+    func windowQualification() {
+        #expect(LastWindowQuitController.isQualifyingWindow(role: "AXWindow", subrole: "AXStandardWindow"))
+        #expect(LastWindowQuitController.isQualifyingWindow(role: "AXWindow", subrole: "AXDialog"))
+        #expect(!LastWindowQuitController.isQualifyingWindow(role: "AXWindow", subrole: "AXSystemDialog"))
+        #expect(!LastWindowQuitController.isQualifyingWindow(role: "AXWindow", subrole: "AXFloatingWindow"))
+        #expect(!LastWindowQuitController.isQualifyingWindow(role: "AXSheet", subrole: "AXStandardWindow"))
+        #expect(!LastWindowQuitController.isQualifyingWindow(role: "AXWindow", subrole: nil))
+    }
+}
+
+// MARK: - macOS Game Mode
+
+@Suite("macOS Game Mode gamepolicyctl status parsing")
+struct GameModeStatusTests {
+    @Test("Parses automatic, forced on and forced off outputs from gamepolicyctl")
+    func parseGamePolicyOutputs() {
+        let autoOff = """
+        Game mode is off.
+        Game mode enablement policy is currently automatic. The system must meet all specified requirements to enable game mode.
+        """
+        let parsedAutoOff = GameModeManager.parseStatusOutput(autoOff)
+        #expect(parsedAutoOff == GameModeStatus(isActive: false, policy: .automatic))
+        #expect(parsedAutoOff?.displayText == "Off · Automatic")
+        #expect(parsedAutoOff?.isForcedOn == false)
+
+        let forcedOn = """
+        Game mode is on.
+        Game mode enablement policy is currently disabled. Game mode is forced always on.
+        """
+        let parsedForcedOn = GameModeManager.parseStatusOutput(forcedOn)
+        #expect(parsedForcedOn == GameModeStatus(isActive: true, policy: .forcedOn))
+        #expect(parsedForcedOn?.displayText == "On · Forced On")
+        #expect(parsedForcedOn?.isForcedOn == true)
+
+        let forcedOff = """
+        Game mode is off.
+        Game mode enablement policy is currently disabled. Game mode is forced always off.
+        """
+        let parsedForcedOff = GameModeManager.parseStatusOutput(forcedOff)
+        #expect(parsedForcedOff == GameModeStatus(isActive: false, policy: .forcedOff))
+        #expect(parsedForcedOff?.displayText == "Off · Forced Off")
+        #expect(parsedForcedOff?.isForcedOn == false)
+
+        let ansiForcedOn = "Game mode is \u{001B}[0;32mon\u{001B}[0;0m.\u{001B}[0;33m\u{001B}[0;0m\nGame mode enablement policy is currently disabled. Game mode is forced always on.\n"
+        #expect(GameModeManager.parseStatusOutput(ansiForcedOn) == GameModeStatus(isActive: true, policy: .forcedOn))
+
+        let ansiAutoOff = "Game mode is \u{001B}[0;31moff\u{001B}[0;0m.\nGame mode enablement policy is currently automatic. The system must meet all specified requirements to enable game mode.\n"
+        #expect(GameModeManager.parseStatusOutput(ansiAutoOff) == GameModeStatus(isActive: false, policy: .automatic))
+
+        #expect(GameModeManager.parseStatusOutput("unexpected output") == nil)
+    }
+}
+
+

@@ -9,10 +9,16 @@ public enum AeronToolsIcon {
     /// Shows a sleek studio display with internal hardware control sliders, plus a secondary display
     /// frame or wireless broadcast waves when active.
     public static func menuBarImage(
+        isGameModeActive: Bool = false,
         isCaffeineActive: Bool,
         isStreaming: Bool,
         hasExternalDisplays: Bool
     ) -> NSImage {
+        if isGameModeActive,
+           let controller = NSImage(systemSymbolName: "gamecontroller.fill", accessibilityDescription: "Aeron Tools – Game Mode On") {
+            controller.isTemplate = true
+            return controller
+        }
         if isCaffeineActive,
            let cup = NSImage(systemSymbolName: "cup.and.heat.waves.fill", accessibilityDescription: "Aeron Tools – Caffeine On") {
             cup.isTemplate = true
@@ -166,6 +172,7 @@ public final class StatusBarController: NSObject, NSPopoverDelegate {
             _ = model.showMenuBarIcon
             _ = model.showAccessoriesCard
             _ = WirelessDisplayManager.shared.isStreaming
+            _ = GameModeManager.shared.isGameModeActive
             updateTelemetry()
         } onChange: {
             Task { @MainActor in
@@ -196,13 +203,16 @@ public final class StatusBarController: NSObject, NSPopoverDelegate {
         self.statusItem = item
     }
 
-    /// Caffeine takes precedence; otherwise the custom Aeron Tools icon reflects whether Wireless Display streaming or an external display is active.
+    /// Game Mode and Caffeine take precedence; otherwise the custom Aeron Tools icon reflects whether Wireless Display streaming or an external display is active.
     /// Live stats, when enabled, appear as text beside the icon.
     public func updateIcon() {
         guard let button = statusItem?.button else { return }
         let isStreaming = WirelessDisplayManager.shared.isStreaming
+        let isGameModeActive = GameModeManager.shared.isGameModeActive
         let description: String
-        if model.isCaffeineActive {
+        if isGameModeActive {
+            description = "Aeron Tools – Game Mode On"
+        } else if model.isCaffeineActive {
             description = "Aeron Tools – Caffeine On"
         } else if isStreaming {
             description = "Aeron Tools – Wireless Display Streaming"
@@ -213,6 +223,7 @@ public final class StatusBarController: NSObject, NSPopoverDelegate {
         }
 
         let icon = AeronToolsIcon.menuBarImage(
+            isGameModeActive: isGameModeActive,
             isCaffeineActive: model.isCaffeineActive,
             isStreaming: isStreaming,
             hasExternalDisplays: model.hasExternalDisplays
@@ -249,6 +260,7 @@ public final class StatusBarController: NSObject, NSPopoverDelegate {
             AccessibilityPermission.shared.refresh()
             WirelessDisplayManager.shared.refreshPermissions()
             WirelessDisplayManager.shared.refreshNetworkInterfaces()
+            Task { await GameModeManager.shared.refreshStatus() }
             AccessoryRegistry.popoverWillShow()
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
             popover.contentViewController?.view.window?.makeKey()
