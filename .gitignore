@@ -12,9 +12,9 @@ build/
 
 # Node / Frontend
 node_modules/
-cross-platform/node_modules/
-cross-platform/dist/
-cross-platform/decky-plugin/dist/
+ui/node_modules/
+ui/dist/
+platforms/steamos/decky/dist/
 .vite/
 npm-debug.log*
 yarn-debug.log*
@@ -22,10 +22,9 @@ yarn-error.log*
 
 # Rust / Cargo
 **/target/
-cross-platform/target/
 
-# Generated UniFFI native binaries & XCFrameworks (rebuilt via build-macos-xcframework.sh)
-cross-platform/swift/build/
-cross-platform/swift/AeronCoreFFI.xcframework/
-cross-platform/swift/AeronCoreKit/.build/
-cross-platform/swift/AeronCoreKit/Sources/AeronCoreKit/aeron_ffi.swift
+# Generated UniFFI native binaries & XCFrameworks (rebuilt via platforms/macos/ffi/build-xcframework.sh)
+platforms/macos/ffi/build/
+platforms/macos/ffi/AeronCoreFFI.xcframework/
+platforms/macos/ffi/AeronCoreKit/.build/
+platforms/macos/ffi/AeronCoreKit/Sources/AeronCoreKit/aeron_ffi.swift

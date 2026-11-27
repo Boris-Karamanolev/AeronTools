@@ -1,0 +1,14 @@
+Aeron Tools for Linux and SteamOS
+
+Desktop Mode, and other Linux desktops:
+  chmod +x Aeron-Tools.AppImage
+  ./Aeron-Tools.AppImage
+  If it does not start (SteamOS has no FUSE mount):
+  APPIMAGE_EXTRACT_AND_RUN=1 ./Aeron-Tools.AppImage
+
+SteamOS Gaming Mode:
+  Gaming Mode does not run the AppImage. It runs aeron-daemon and the Decky plugin.
+  From Desktop Mode:
+    chmod +x install-steamos.sh
+    ./install-steamos.sh --udev
+  Open Aeron Tools from the Quick Access menu after Decky restarts.
