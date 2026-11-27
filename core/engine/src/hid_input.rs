@@ -615,6 +615,12 @@ impl GMouseLive {
         }
     }
 
+    /// The receiver reported the mouse going offline or coming back: it no longer spies or holds our map.
+    pub fn link_changed(&mut self) {
+        self.spying = false;
+        self.last_mask = 0;
+    }
+
     pub fn wants_spy(&self) -> bool {
         self.back != AccessoryButtonAction::SystemDefault
             || self.forward != AccessoryButtonAction::SystemDefault

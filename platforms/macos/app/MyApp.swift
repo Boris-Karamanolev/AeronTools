@@ -33,6 +33,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         LastWindowQuitController.shared.setEnabled(DisplayStateModel.shared.quitAppOnLastWindowClosed)
         EngineHostActions.install()
         Task { await SharedCoreEngine.shared.startWatching() }
+        // Wake is posted on the workspace center only. Accessories often lose their settings across sleep.
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification,
+            object: nil,
+            queue: .main
+        ) { _ in
+            Task { await SharedCoreEngine.shared.systemDidWake() }
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {

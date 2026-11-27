@@ -181,17 +181,25 @@ fn reader(
             let Ok(mut live) = runtime.lock() else {
                 break;
             };
-            if report.as_deref().is_some_and(hidpp::is_receiver_link_up) {
-                relink = true;
-                if let Some(mx) = live.mx.as_mut() {
-                    mx.dirty = true;
+            if let Some((index, up)) = report.as_deref().and_then(hidpp::receiver_link_event) {
+                // Only the device that linked: a keyboard waking on the same Bolt receiver must not
+                // re-run the mouse's diversions and profile read.
+                if let Some(mx) = live.mx.as_mut().filter(|mx| mx.device_index == index) {
+                    mx.dirty |= up;
+                    relink |= up;
                 }
-                if let Some(keyboard) = live.keyboard.as_mut() {
-                    keyboard.dirty = true;
+                if let Some(keyboard) = live.keyboard.as_mut().filter(|k| k.device_index == index) {
+                    keyboard.dirty |= up;
+                    relink |= up;
                 }
-                if let Some(mouse) = live.g_mouse.as_mut() {
-                    mouse.dirty = true;
-                    mouse.profile_dirty = true;
+                if let Some(mouse) = live.g_mouse.as_mut().filter(|m| m.device_index == index) {
+                    // A power-cycled mouse has dropped spy reporting and its button map either way.
+                    mouse.link_changed();
+                    if up {
+                        mouse.dirty = true;
+                        mouse.profile_dirty = true;
+                        relink = true;
+                    }
                 }
             }
             let sign = scroll_sign(
@@ -649,7 +657,8 @@ fn release_mx(dev: &HidDevice, mx: &MxLive) {
 fn send_control(dev: &HidDevice, device_index: u8, feature: u8, cid: u16, diverted: bool, raw_xy: bool) {
     let packet = hidpp::set_control_reporting_packet(device_index, feature, cid, diverted, raw_xy);
     let reply = exchange(dev, &packet);
-    if diverted && raw_xy && reply.as_deref().is_some_and(hidpp::is_error_response) {
+    // `exchange` returns None for an error reply as well as a timeout; fall back on either, like the old app.
+    if diverted && raw_xy && reply.is_none() {
         let fallback = hidpp::set_control_reporting_packet(device_index, feature, cid, true, false);
         let _ = exchange(dev, &fallback);
     }
@@ -1071,12 +1080,14 @@ fn save_g_profile(dev: &HidDevice, mouse: &GMouseLive) -> bool {
     if patched == original {
         return true;
     }
-    if !write_profile_sector(dev, mouse.device_index, feature, sector, &patched) {
+    let verified = write_profile_sector(dev, mouse.device_index, feature, sector, &patched)
+        && read_profile_sector(dev, mouse.device_index, feature, sector, info.sector_size)
+            .is_some_and(|read_back| read_back == patched);
+    if !verified {
+        // A half-written sector fails its CRC and can't be patched again, so put the original back.
         let _ = write_profile_sector(dev, mouse.device_index, feature, sector, &original);
-        return false;
     }
-    read_profile_sector(dev, mouse.device_index, feature, sector, info.sector_size)
-        .is_some_and(|read_back| read_back == patched)
+    verified
 }
 
 fn read_profile_sector(

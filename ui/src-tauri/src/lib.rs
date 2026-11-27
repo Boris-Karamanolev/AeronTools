@@ -139,7 +139,11 @@ pub fn run() {
                         let _ = app.state::<AeronCore>().toggle_game_mode_forced();
                     }
                     "refresh" => {
-                        let _ = app.state::<AeronCore>().refresh_all();
+                        // Blocks until the watcher's scan finishes; keep it off the event loop.
+                        let core = app.state::<AeronCore>().inner().clone();
+                        std::thread::spawn(move || {
+                            let _ = core.refresh_all();
+                        });
                     }
                     "quit" => {
                         app.state::<AeronCore>().prepare_for_termination();
