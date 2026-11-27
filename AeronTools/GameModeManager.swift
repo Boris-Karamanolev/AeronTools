@@ -3,7 +3,7 @@ import SwiftUI
 
 // MARK: - GameModePolicy & Status
 
-public enum GameModePolicy: String, CaseIterable, Identifiable, Equatable, Sendable {
+nonisolated public enum GameModePolicy: String, CaseIterable, Identifiable, Equatable, Sendable {
     case automatic = "auto"
     case forcedOn = "on"
     case forcedOff = "off"
@@ -19,7 +19,7 @@ public enum GameModePolicy: String, CaseIterable, Identifiable, Equatable, Senda
     }
 }
 
-public struct GameModeStatus: Equatable, Sendable {
+nonisolated public struct GameModeStatus: Equatable, Sendable {
     public let isActive: Bool
     public let policy: GameModePolicy
 

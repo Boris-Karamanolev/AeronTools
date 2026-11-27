@@ -1,0 +1,25 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/aeron-protocols",
+    "crates/aeron-platform",
+    "crates/aeron-daemon",
+    "crates/aeron-ffi",
+    "src-tauri",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.40", features = ["rt-multi-thread", "macros", "sync", "time", "net"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+hidapi = "2.6"
+axum = "0.7"
+tower-http = { version = "0.6", features = ["cors"] }
+dirs = "5.0"

@@ -1,0 +1,18 @@
+# AeronTools udev rules for Linux / SteamOS (persists across SteamOS updates in /etc/udev/rules.d/)
+# Grants non-root access to supported HID peripherals, DDC/CI I2C buses, and uinput.
+
+# Logitech (MX Master, MX Keyboard, Bolt/Unifying/LIGHTSPEED receivers, G mice & G515)
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="046d", MODE="0660", TAG+="uaccess"
+
+# Keychron M3 Mini 4K mouse & 4K Link receiver
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3434", ATTRS{idProduct}=="d038", MODE="0660", TAG+="uaccess"
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3434", ATTRS{idProduct}=="d041", MODE="0660", TAG+="uaccess"
+
+# Razer Thunderbolt 4 Dock Chroma lighting controller
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1532", ATTRS{idProduct}=="0f21", MODE="0660", TAG+="uaccess"
+
+# External monitor DDC/CI (/dev/i2c-*)
+KERNEL=="i2c-[0-9]*", MODE="0660", TAG+="uaccess"
+
+# Built-in backlight control (Steam Deck / laptops)
+ACTION=="add", SUBSYSTEM=="backlight", RUN+="/bin/chgrp video /sys/class/backlight/%k/brightness", RUN+="/bin/chmod g+w /sys/class/backlight/%k/brightness"

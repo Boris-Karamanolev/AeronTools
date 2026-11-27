@@ -1,0 +1,14 @@
+[Unit]
+Description=AeronTools Hardware Daemon (SteamOS Gaming & Desktop Mode)
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/aeron-daemon
+Restart=on-failure
+RestartSec=3
+Environment=AERON_DAEMON_PORT=47620
+Environment=RUST_LOG=info
+
+[Install]
+WantedBy=default.target

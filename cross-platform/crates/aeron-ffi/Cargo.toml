@@ -1,0 +1,19 @@
+[package]
+name = "aeron-ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "aeron_ffi"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+
+[dependencies]
+aeron-protocols = { path = "../aeron-protocols" }
+aeron-platform = { path = "../aeron-platform" }
+serde_json = { workspace = true }
+uniffi = { version = "0.28", features = ["cli"] }

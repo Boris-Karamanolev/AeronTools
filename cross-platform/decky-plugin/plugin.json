@@ -1,0 +1,11 @@
+{
+  "name": "Aeron Tools",
+  "author": "Aeron Labs",
+  "flags": [],
+  "api_version": 1,
+  "publish": {
+    "tags": ["display", "peripherals", "ddc", "hardware"],
+    "description": "Control external monitors (DDC/CI), Logitech/Keychron/Razer peripherals, Caffeine, and thermals from SteamOS Gaming Mode.",
+    "image": ""
+  }
+}
