@@ -319,12 +319,10 @@ impl PlatformBackend for WindowsBackend {
             }
 
             for pm in &phys {
-                let nul = pm
-                    .szPhysicalMonitorDescription
-                    .iter()
-                    .position(|&c| c == 0)
-                    .unwrap_or(pm.szPhysicalMonitorDescription.len());
-                let raw_name = String::from_utf16_lossy(&pm.szPhysicalMonitorDescription[..nul]);
+                // Copy out of the #[repr(C, packed(1))] Win32 PHYSICAL_MONITOR struct before slicing.
+                let desc = pm.szPhysicalMonitorDescription;
+                let nul = desc.iter().position(|&c| c == 0).unwrap_or(desc.len());
+                let raw_name = String::from_utf16_lossy(&desc[..nul]);
                 let name = if raw_name.trim().is_empty() {
                     format!("Display {}", index + 1)
                 } else {
