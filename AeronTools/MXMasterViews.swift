@@ -7,7 +7,7 @@ import SwiftUI
 /// connected.
 struct MXMasterSettingsTabView: View {
     @Bindable var manager = MXMasterManager.shared
-    private var accessibilityPermission = AccessibilityPermission.shared
+    private var accessibilityPermission: AccessibilityPermission { .shared }
 
     private static let dpiPresets = [800, 1200, 1600, 2400, 4000, 8000]
     /// The MX supports the wheel-mode toggle on top of the shared actions.

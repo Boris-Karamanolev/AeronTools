@@ -8,7 +8,7 @@ public struct SettingsView: View {
     @Bindable var gameMode = GameModeManager.shared
     @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
     @State private var loginItemNeedsApproval = SMAppService.mainApp.status == .requiresApproval
-    private var accessibilityPermission = AccessibilityPermission.shared
+    private var accessibilityPermission: AccessibilityPermission { .shared }
     @State private var showTeslaSetupSheet = false
     @State private var showDiagnostics = false
 
@@ -411,7 +411,7 @@ public struct SettingsView: View {
 
 private struct WirelessSettingsTabView: View {
     @Bindable var wireless: WirelessDisplayManager
-    private var accessibilityPermission = AccessibilityPermission.shared
+    private var accessibilityPermission: AccessibilityPermission { .shared }
     @Binding var showTeslaSetupSheet: Bool
     @Binding var showDiagnostics: Bool
 
