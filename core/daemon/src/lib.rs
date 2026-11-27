@@ -241,7 +241,12 @@ async fn get_state(State(core): State<AeronCore>) -> Json<AppSnapshot> {
 }
 
 async fn refresh_all(State(core): State<AeronCore>) -> Json<AppSnapshot> {
-    Json(core.refresh_all())
+    // Waits for the hardware watcher's scan; don't hold a runtime worker meanwhile.
+    let blocking = core.clone();
+    match tokio::task::spawn_blocking(move || blocking.refresh_all()).await {
+        Ok(snapshot) => Json(snapshot),
+        Err(_) => Json(core.snapshot()),
+    }
 }
 
 async fn set_brightness(

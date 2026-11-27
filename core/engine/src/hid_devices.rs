@@ -170,6 +170,22 @@ impl HidManager {
         for session in sessions {
             session.stop();
         }
+        // macOS sessions hand the G mouse back on stop. Elsewhere there's no session, so leave host mode
+        // here; otherwise the mouse ignores its onboard profile (and G HUB) until it's power-cycled.
+        #[cfg(not(target_os = "macos"))]
+        if self.g_mouse_primed {
+            if let Some((path, dev_idx)) = self.logitech_g_mouse_path.clone() {
+                if let Some(dev) = self.open_path(&path) {
+                    if let Some(feature) =
+                        self.resolve_feature(&dev, dev_idx, logitech_g::FEATURE_ONBOARD_PROFILES)
+                    {
+                        let packet =
+                            hidpp::make_long_packet(dev_idx, feature, 1, hidpp::SOFTWARE_ID, &[0x01]);
+                        let _ = self.hidpp_request(&dev, &packet);
+                    }
+                }
+            }
+        }
     }
 
     pub fn set_dock_layouts(&mut self, razer: DockLayout, satechi: DockLayout) {
@@ -1300,7 +1316,7 @@ impl HidManager {
                         live.pending.push(DeviceWrite::MxDpi(clamped));
                     }
                 }
-                accessory_store::save(&self.state);
+                accessory_store::save(&self.state, &self.stored);
                 return;
             }
             if let Some(dev) = self.open_path(path) {
@@ -1343,7 +1359,7 @@ impl HidManager {
                         });
                     }
                 }
-                accessory_store::save(&self.state);
+                accessory_store::save(&self.state, &self.stored);
                 return;
             }
             if let Some(dev) = self.open_path(path) {
@@ -1399,7 +1415,7 @@ impl HidManager {
                 }
             }
         }
-        accessory_store::save(&self.state);
+        accessory_store::save(&self.state, &self.stored);
     }
 
     pub fn set_logitech_g_dpi(&mut self, dpi: u16) {
@@ -1413,10 +1429,10 @@ impl HidManager {
         if let Some((ref path, dev_idx)) = self.logitech_g_mouse_path.clone() {
             if self.session_interest(path).is_some() {
                 self.enqueue(path, DeviceWrite::GDpi { dpi: clamped, lod });
-                accessory_store::save(&self.state);
+                accessory_store::save(&self.state, &self.stored);
                 return;
             }
-            accessory_store::save(&self.state);
+            accessory_store::save(&self.state, &self.stored);
             if let Some(dev) = self.open_path(path) {
                 if let Some(fidx) =
                     self.resolve_feature(&dev, dev_idx, logitech_g::FEATURE_EXTENDED_DPI)
@@ -1441,7 +1457,7 @@ impl HidManager {
         };
         self.state.logitech_g_mouse.report_rate_hz = hz;
         self.stored.g_report_rate = true;
-        accessory_store::save(&self.state);
+        accessory_store::save(&self.state, &self.stored);
         if let Some((ref path, dev_idx)) = self.logitech_g_mouse_path.clone() {
             if self.session_interest(path).is_some() {
                 self.enqueue(path, DeviceWrite::GReportRate(hz));
@@ -1467,7 +1483,7 @@ impl HidManager {
     pub fn set_logitech_g_triggers(&mut self, triggers: TriggerSettings) {
         self.state.logitech_g_mouse.triggers = Some(triggers);
         self.stored.g_triggers = true;
-        accessory_store::save(&self.state);
+        accessory_store::save(&self.state, &self.stored);
         if let Some((ref path, dev_idx)) = self.logitech_g_mouse_path.clone() {
             if self.session_interest(path).is_some() {
                 self.enqueue(path, DeviceWrite::GTriggers(triggers));
@@ -1515,7 +1531,7 @@ impl HidManager {
                 }
             }
         }
-        accessory_store::save(&self.state);
+        accessory_store::save(&self.state, &self.stored);
     }
 
     pub fn set_mx_keyboard_backlight(
@@ -1602,7 +1618,7 @@ impl HidManager {
             if self.session_interest(path).is_some() {
                 let host = self.state.mx_keyboard.current_host.unwrap_or(0);
                 self.enqueue(path, DeviceWrite::KeyboardFn { standard: standard_fn, host });
-                accessory_store::save(&self.state);
+                accessory_store::save(&self.state, &self.stored);
                 return;
             }
             if let Some(dev) = self.open_path(path) {
@@ -1643,7 +1659,7 @@ impl HidManager {
                 }
             }
         }
-        accessory_store::save(&self.state);
+        accessory_store::save(&self.state, &self.stored);
     }
 
     pub fn set_g_keyboard_lighting(&mut self, brightness: u16, lighting: RgbLighting) {
@@ -1651,7 +1667,7 @@ impl HidManager {
         self.state.logitech_g_keyboard.brightness = brightness;
         self.state.logitech_g_keyboard.lighting = lighting;
         self.stored.g_lighting = true;
-        accessory_store::save(&self.state);
+        accessory_store::save(&self.state, &self.stored);
         if let Some((ref path, dev_idx)) = self.logitech_g_keyboard_path.clone() {
             if let Some(dev) = self.open_path(path) {
                 if let Some(br_idx) = self.resolve_feature(
@@ -1789,7 +1805,7 @@ impl HidManager {
                 self.read_keychron_buttons(&dev, routed);
             }
         }
-        accessory_store::save(&self.state);
+        accessory_store::save(&self.state, &self.stored);
     }
 
     pub fn set_razer_dock_lighting(

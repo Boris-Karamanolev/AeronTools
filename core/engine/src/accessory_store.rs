@@ -24,6 +24,9 @@ pub struct Stored {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 struct AccessoryFile {
+    /// 2 = device-owned values (DPI, wheel, rate, triggers, lighting) are written only after the user set them.
+    /// Older files wrote them unconditionally, so their copies are ignored.
+    version: u32,
     mx: Option<MxMasterOptions>,
     mx_dpi: Option<u16>,
     mx_wheel_mode: Option<MxWheelMode>,
@@ -48,6 +51,8 @@ struct AccessoryFile {
     keychron_forward: Option<AccessoryButtonAction>,
 }
 
+const FILE_VERSION: u32 = 2;
+
 fn path() -> Option<PathBuf> {
     dirs::config_dir().map(|dir| dir.join("AeronTools").join("accessories.json"))
 }
@@ -59,9 +64,20 @@ pub fn apply(state: &mut AccessoriesSnapshot) -> Stored {
     let Ok(text) = fs::read_to_string(path) else {
         return Stored::default();
     };
-    let Ok(saved) = serde_json::from_str::<AccessoryFile>(&text) else {
+    let Ok(mut saved) = serde_json::from_str::<AccessoryFile>(&text) else {
         return Stored::default();
     };
+    if saved.version < FILE_VERSION {
+        saved.mx_dpi = None;
+        saved.mx_wheel_mode = None;
+        saved.mx_smart_shift_enabled = None;
+        saved.mx_smart_shift_threshold = None;
+        saved.g_dpi = None;
+        saved.g_report_rate_hz = None;
+        saved.g_triggers = None;
+        saved.g_lighting = None;
+        saved.g_brightness = None;
+    }
     if let Some(mx) = saved.mx {
         let slot = &mut state.mx_master;
         slot.standard_vertical_scroll = mx.standard_vertical_scroll;
@@ -142,16 +158,18 @@ pub fn apply(state: &mut AccessoriesSnapshot) -> Stored {
     }
 }
 
-pub fn save(state: &AccessoriesSnapshot) {
+/// Device-owned values are written only once the user chose them (`stored`); otherwise the device keeps its own.
+pub fn save(state: &AccessoriesSnapshot, stored: &Stored) {
     let Some(path) = path() else {
         return;
     };
     let file = AccessoryFile {
+        version: FILE_VERSION,
         mx: Some(crate::hid_input::options_from_state(&state.mx_master)),
-        mx_dpi: Some(state.mx_master.dpi),
-        mx_wheel_mode: Some(state.mx_master.wheel_mode),
-        mx_smart_shift_enabled: Some(state.mx_master.smart_shift_enabled),
-        mx_smart_shift_threshold: Some(state.mx_master.smart_shift_threshold),
+        mx_dpi: stored.mx_dpi.then_some(state.mx_master.dpi),
+        mx_wheel_mode: stored.mx_smart_shift.then_some(state.mx_master.wheel_mode),
+        mx_smart_shift_enabled: stored.mx_smart_shift.then_some(state.mx_master.smart_shift_enabled),
+        mx_smart_shift_threshold: stored.mx_smart_shift.then_some(state.mx_master.smart_shift_threshold),
         keyboard_key_actions: state
             .mx_keyboard
             .key_actions
@@ -162,11 +180,11 @@ pub fn save(state: &AccessoriesSnapshot) {
         g_back: Some(state.logitech_g_mouse.back_button_action),
         g_forward: Some(state.logitech_g_mouse.forward_button_action),
         g_saves_profile: Some(state.logitech_g_mouse.saves_to_onboard_profile),
-        g_dpi: Some(state.logitech_g_mouse.dpi),
-        g_report_rate_hz: Some(state.logitech_g_mouse.report_rate_hz),
-        g_triggers: state.logitech_g_mouse.triggers,
-        g_lighting: Some(state.logitech_g_keyboard.lighting),
-        g_brightness: Some(state.logitech_g_keyboard.brightness),
+        g_dpi: stored.g_dpi.then_some(state.logitech_g_mouse.dpi),
+        g_report_rate_hz: stored.g_report_rate.then_some(state.logitech_g_mouse.report_rate_hz),
+        g_triggers: state.logitech_g_mouse.triggers.filter(|_| stored.g_triggers),
+        g_lighting: stored.g_lighting.then_some(state.logitech_g_keyboard.lighting),
+        g_brightness: stored.g_lighting.then_some(state.logitech_g_keyboard.brightness),
         keychron_back: Some(state.keychron_m3_mini.back_button_action),
         keychron_forward: Some(state.keychron_m3_mini.forward_button_action),
     };

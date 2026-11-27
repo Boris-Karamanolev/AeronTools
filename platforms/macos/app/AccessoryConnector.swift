@@ -279,9 +279,6 @@ struct AccessoriesSettingsTabView: View {
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             Task { await engine.refreshAccessoriesAndDocks() }
         }
-        .onReceive(NotificationCenter.default.publisher(for: NSWorkspace.didWakeNotification)) { _ in
-            Task { await engine.systemDidWake() }
-        }
     }
 
     private func deviceSection(_ page: AccessoryPage) -> some View {

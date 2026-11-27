@@ -264,7 +264,7 @@ public final class SharedCoreEngine {
     }
 
     public func setMxKeyboardKeyAction(position: UInt8, action: CoreButtonAction) async {
-        await runMutation { engine in
+        await runMutation(key: "setMxKeyboardKeyAction.\(position)") { engine in
             engine.setMxKeyboardKeyAction(position: position, action: action)
         }
     }
@@ -319,16 +319,28 @@ public final class SharedCoreEngine {
 
     // MARK: - Helpers
 
+    @ObservationIgnored private var pendingMutations: [String: @Sendable (AeronEngine) -> CoreAppSnapshot] = [:]
+    @ObservationIgnored private var runningMutations: Set<String> = []
+
+    /// Runs accessory writes one at a time per setter, newest value wins. Sliders and colour pickers fire many
+    /// changes a second; detached tasks would reach the device in any order and could leave it on a stale value.
     private func runMutation(
+        key: String = #function,
         _ work: @escaping @Sendable (AeronEngine) -> CoreAppSnapshot
     ) async {
         await startIfNeeded()
         guard let box else { return }
-        let updated = await Task.detached(priority: .userInitiated) {
-            work(box.engine)
-        }.value
-        self.snapshot = updated
-        self.lastError = nil
+        pendingMutations[key] = work
+        guard !runningMutations.contains(key) else { return }
+        runningMutations.insert(key)
+        defer { runningMutations.remove(key) }
+        while let next = pendingMutations.removeValue(forKey: key) {
+            let updated = await Task.detached(priority: .userInitiated) {
+                next(box.engine)
+            }.value
+            self.snapshot = updated
+            self.lastError = nil
+        }
     }
 
     private func runThrowingMutation(

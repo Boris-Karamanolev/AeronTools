@@ -21,9 +21,13 @@ pub fn get_snapshot(core: State<'_, AeronCore>) -> AppSnapshot {
     core.snapshot()
 }
 
+/// Waits for the hardware watcher's scan (seconds on Windows), so it must not run on the main thread.
 #[tauri::command]
-pub fn refresh_all(core: State<'_, AeronCore>) -> AppSnapshot {
-    core.refresh_all()
+pub async fn refresh_all(core: State<'_, AeronCore>) -> Result<AppSnapshot, String> {
+    let core = core.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || core.refresh_all())
+        .await
+        .map_err(|err| err.to_string())
 }
 
 #[tauri::command]

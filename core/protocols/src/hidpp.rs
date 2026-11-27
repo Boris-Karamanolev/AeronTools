@@ -387,10 +387,13 @@ pub fn parse_control_remap(reply: &[u8], control_id: u16) -> Option<u16> {
 
 /// HID++ 1.0 receiver notification `0x41`. Link up when byte 4 does not have the disconnect bit.
 pub fn is_receiver_link_up(report: &[u8]) -> bool {
-    let Some(norm) = normalize_report(report) else {
-        return false;
-    };
-    norm.len() > 4 && norm[2] == 0x41 && norm[4] & 0x40 == 0
+    receiver_link_event(report).is_some_and(|(_, up)| up)
+}
+
+/// HID++ 1.0 receiver notification `0x41` as `(device index, link up)`.
+pub fn receiver_link_event(report: &[u8]) -> Option<(u8, bool)> {
+    let norm = normalize_report(report)?;
+    (norm.len() > 4 && norm[2] == 0x41).then(|| (norm[1], norm[4] & 0x40 == 0))
 }
 
 pub fn set_control_remap_packet(
@@ -631,6 +634,18 @@ pub fn parse_raw_xy_event(report: &[u8], expected_feature_index: u8) -> Option<(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_receiver_link_events_per_device() {
+        // Slot 3 connected (bit 0x40 clear), then disconnected.
+        let up = [SHORT_REPORT_ID, 0x03, 0x41, 0x04, 0x01, 0x10, 0x40];
+        let down = [SHORT_REPORT_ID, 0x03, 0x41, 0x04, 0x41, 0x10, 0x40];
+        assert_eq!(receiver_link_event(&up), Some((0x03, true)));
+        assert_eq!(receiver_link_event(&down), Some((0x03, false)));
+        assert!(is_receiver_link_up(&up));
+        assert!(!is_receiver_link_up(&down));
+        assert_eq!(receiver_link_event(&[SHORT_REPORT_ID, 0x03, 0x40, 0, 0, 0, 0]), None);
+    }
 
     #[test]
     fn builds_and_parses_hidpp_packets() {
