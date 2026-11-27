@@ -338,6 +338,61 @@ pub fn set_control_reporting_packet(
     )
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ControlInfo {
+    pub cid: u16,
+    pub flags: u8,
+    pub group: u8,
+    pub group_mask: u8,
+}
+
+impl ControlInfo {
+    pub fn can_remap_to(self, target: Self) -> bool {
+        if target.cid == self.cid {
+            return true;
+        }
+        let remappable = self.flags & 0x10 != 0;
+        remappable && target.group != 0 && self.group_mask & (1 << (target.group - 1)) != 0
+    }
+}
+
+/// `getCidInfo` (function 1): `[4…5]` CID, `[8]` flags, `[10]` group, `[11]` group mask.
+pub fn parse_control_info(reply: &[u8]) -> Option<ControlInfo> {
+    let norm = normalize_report(reply)?;
+    if norm.len() < 12 || is_error_response(&norm) {
+        return None;
+    }
+    let cid = ((norm[4] as u16) << 8) | (norm[5] as u16);
+    (cid != 0).then_some(ControlInfo {
+        cid,
+        flags: norm[8],
+        group: norm[10],
+        group_mask: norm[11],
+    })
+}
+
+/// `getCidReporting` (function 2): `[7…8]` remap target. Zero means the control itself.
+pub fn parse_control_remap(reply: &[u8], control_id: u16) -> Option<u16> {
+    let norm = normalize_report(reply)?;
+    if norm.len() < 9 || is_error_response(&norm) {
+        return None;
+    }
+    let cid = ((norm[4] as u16) << 8) | (norm[5] as u16);
+    if cid != control_id {
+        return None;
+    }
+    let target = ((norm[7] as u16) << 8) | (norm[8] as u16);
+    Some(if target == 0 { control_id } else { target })
+}
+
+/// HID++ 1.0 receiver notification `0x41`. Link up when byte 4 does not have the disconnect bit.
+pub fn is_receiver_link_up(report: &[u8]) -> bool {
+    let Some(norm) = normalize_report(report) else {
+        return false;
+    };
+    norm.len() > 4 && norm[2] == 0x41 && norm[4] & 0x40 == 0
+}
+
 pub fn set_control_remap_packet(
     device_index: u8,
     feature_index: u8,

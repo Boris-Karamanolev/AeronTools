@@ -637,6 +637,8 @@ nonisolated public protocol AeronEngineProtocol : AnyObject {
     
     func stepAllBrightness(delta: Float) throws  -> CoreAppSnapshot
     
+    func systemDidWake() 
+    
     func toggleBuiltinDisplay() throws  -> CoreAppSnapshot
     
     func toggleCaffeine() throws  -> CoreAppSnapshot
@@ -937,6 +939,12 @@ open func stepAllBrightness(delta: Float)throws  -> CoreAppSnapshot {
         FfiConverterFloat.lower(delta),$0
     )
 })
+}
+    
+open func systemDidWake() {try! rustCall() {
+    uniffi_aeron_ffi_fn_method_aeronengine_system_did_wake(self.uniffiClonePointer(),$0
+    )
+}
 }
     
 open func toggleBuiltinDisplay()throws  -> CoreAppSnapshot {
@@ -6063,6 +6071,9 @@ nonisolated private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_aeron_ffi_checksum_method_aeronengine_step_all_brightness() != 1416) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_aeron_ffi_checksum_method_aeronengine_system_did_wake() != 13554) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_aeron_ffi_checksum_method_aeronengine_toggle_builtin_display() != 46834) {

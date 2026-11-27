@@ -1364,6 +1364,10 @@ impl AeronEngine {
         self.core.refresh_accessories_and_docks();
     }
 
+    pub fn system_did_wake(&self) {
+        self.core.system_did_wake();
+    }
+
     pub fn set_display_brightness(
         &self,
         display_id: String,

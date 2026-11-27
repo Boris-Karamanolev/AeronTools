@@ -96,6 +96,17 @@ public final class SharedCoreEngine {
         self.snapshot = updated
     }
 
+    /// Wake re-probes HID on the watcher thread, including devices that reconnected while the Mac slept.
+    public func systemDidWake() async {
+        await startIfNeeded()
+        guard let box else { return }
+        let updated = await Task.detached(priority: .utility) { () -> CoreAppSnapshot in
+            box.engine.systemDidWake()
+            return box.engine.snapshot()
+        }.value
+        self.snapshot = updated
+    }
+
     public func setDisplayBrightness(displayId: String, level: Float) async {
         await runThrowingMutation { engine in
             try engine.setDisplayBrightness(displayId: displayId, level: level)

@@ -127,6 +127,12 @@ struct PrefsSaveState {
     shutdown: bool,
 }
 
+struct WatchWake {
+    force_hid: bool,
+    replies: Vec<mpsc::Sender<()>>,
+    shutdown: bool,
+}
+
 /// Thread-safe application core shared by both the Tauri desktop app and `aeron-daemon`.
 ///
 /// `hid` and `hid_snapshot` live behind separate locks from `inner` so slow 300ms USB/HID
@@ -137,6 +143,8 @@ pub struct AeronCore {
     hid: Arc<Mutex<HidManager>>,
     hid_snapshot: Arc<Mutex<AccessoriesSnapshot>>,
     prefs_saver: Arc<(Mutex<PrefsSaveState>, Condvar)>,
+    /// Wakes the hardware watcher so HID probes stay on the thread that created the IOHIDManager.
+    watch: Arc<(Mutex<WatchWake>, Condvar)>,
 }
 
 impl Default for AeronCore {
@@ -239,6 +247,15 @@ impl AeronCore {
         let watcher_inner = Arc::downgrade(&inner);
         let watcher_hid = Arc::downgrade(&hid);
         let watcher_hid_snap = Arc::downgrade(&hid_snapshot);
+        let watch = Arc::new((
+            Mutex::new(WatchWake {
+                force_hid: false,
+                replies: Vec::new(),
+                shutdown: false,
+            }),
+            Condvar::new(),
+        ));
+        let watcher_wake = Arc::downgrade(&watch);
         let (hid_ready_tx, hid_ready_rx) = mpsc::channel();
         let _ = thread::Builder::new()
             .name("aeron-hw-watcher".into())
@@ -258,18 +275,54 @@ impl AeronCore {
 
                 let mut tick: u64 = 0;
                 loop {
-                    thread::sleep(Duration::from_secs(1));
+                    let (force, replies) = {
+                        let Some(wake) = watcher_wake.upgrade() else {
+                            break;
+                        };
+                        let (lock, cvar) = &*wake;
+                        let Ok(guard) = lock.lock() else {
+                            break;
+                        };
+                        let guard = if guard.force_hid || guard.shutdown {
+                            guard
+                        } else {
+                            match cvar.wait_timeout(guard, Duration::from_secs(1)) {
+                                Ok((guard, _)) => guard,
+                                Err(_) => break,
+                            }
+                        };
+                        if guard.shutdown {
+                            let replies = guard.replies.clone();
+                            drop(guard);
+                            for reply in replies {
+                                let _ = reply.send(());
+                            }
+                            break;
+                        }
+                        let mut guard = guard;
+                        let force = guard.force_hid;
+                        guard.force_hid = false;
+                        let replies = std::mem::take(&mut guard.replies);
+                        drop(guard);
+                        (force, replies)
+                    };
                     tick = tick.wrapping_add(1);
                     let (Some(inner_arc), Some(hid_arc), Some(snap_arc)) = (
                         watcher_inner.upgrade(),
                         watcher_hid.upgrade(),
                         watcher_hid_snap.upgrade(),
                     ) else {
+                        for reply in replies {
+                            let _ = reply.send(());
+                        }
                         break;
                     };
 
                     let should_scan_docks = {
                         let Ok(mut guard) = inner_arc.lock() else {
+                            for reply in replies.iter().cloned() {
+                                let _ = reply.send(());
+                            }
                             continue;
                         };
                         if guard.drive_display_policy {
@@ -278,12 +331,15 @@ impl AeronCore {
                         } else if tick % 4 == 0 {
                             let _ = guard.backend.refresh_displays();
                         }
-                        tick % 4 == 0
+                        force || tick % 4 == 0
                     };
 
                     // Dock walks and HID probes stay off `inner`. Windows shells out to
                     // PowerShell here; holding `inner` across that freezes brightness sliders.
                     if !should_scan_docks {
+                        for reply in replies {
+                            let _ = reply.send(());
+                        }
                         continue;
                     }
                     let (razer, satechi) = scan_host_docks();
@@ -297,6 +353,9 @@ impl AeronCore {
                             *s = latest;
                         }
                     }
+                    for reply in replies {
+                        let _ = reply.send(());
+                    }
                 }
             });
         let _ = hid_ready_rx.recv_timeout(Duration::from_secs(3));
@@ -306,7 +365,27 @@ impl AeronCore {
             hid,
             hid_snapshot,
             prefs_saver,
+            watch,
         }
+    }
+
+    /// Asks the hardware watcher to re-probe HID and docks, and waits until that scan finishes.
+    fn request_hid_refresh(&self) {
+        let (tx, rx) = mpsc::channel();
+        {
+            let (lock, cvar) = &*self.watch;
+            if let Ok(mut guard) = lock.lock() {
+                guard.force_hid = true;
+                guard.replies.push(tx);
+                cvar.notify_one();
+            }
+        }
+        let _ = rx.recv_timeout(Duration::from_secs(20));
+    }
+
+    /// Same watcher refresh as a manual rescan. Called when the Mac wakes.
+    pub fn system_did_wake(&self) {
+        self.request_hid_refresh();
     }
 
     fn schedule_preferences_save(&self, prefs: AppPreferences) {
@@ -365,15 +444,7 @@ impl AeronCore {
     /// Fast refresh of dock port topology and HID accessories without holding the display lock
     /// during slow USB/HID probing.
     pub fn refresh_accessories_and_docks(&self) {
-        let (razer, satechi) = scan_host_docks();
-        if let Ok(mut h) = self.hid.lock() {
-            h.set_dock_layouts(razer, satechi);
-            h.refresh();
-            let latest = h.snapshot();
-            if let Ok(mut s) = self.hid_snapshot.lock() {
-                *s = latest;
-            }
-        }
+        self.request_hid_refresh();
     }
 
     pub fn refresh_all(&self) -> AppSnapshot {
@@ -382,14 +453,7 @@ impl AeronCore {
             guard.backend.refresh_displays();
             guard.cached_telemetry = None;
         }
-        let layouts = scan_host_docks();
-        {
-            let mut h = self.hid.lock().expect("hid mutex poisoned");
-            h.set_dock_layouts(layouts.0, layouts.1);
-            h.refresh();
-            let latest = h.snapshot();
-            *self.hid_snapshot.lock().expect("hid_snapshot mutex poisoned") = latest;
-        }
+        self.request_hid_refresh();
         self.snapshot()
     }
 
@@ -569,6 +633,13 @@ impl AeronCore {
     }
 
     pub fn prepare_for_termination(&self) {
+        {
+            let (lock, cvar) = &*self.watch;
+            if let Ok(mut guard) = lock.lock() {
+                guard.shutdown = true;
+                cvar.notify_all();
+            }
+        }
         // Flush any pending debounced preferences to disk immediately
         let (lock, cvar) = &*self.prefs_saver;
         if let Ok(mut guard) = lock.lock() {

@@ -7,7 +7,8 @@ use aeron_protocols::hidpp::{
     self, KeyControl, MxWheelMode, CID_BACK_BUTTON, CID_FORWARD_BUTTON, CID_GESTURE_THUMB_BUTTON,
     CID_HAPTIC_PANEL_BUTTON, CID_MIDDLE_BUTTON, CID_MODE_SHIFT_BUTTON,
 };
-use aeron_protocols::logitech_g::{self, SIDE_BUTTON_BACK, SIDE_BUTTON_FORWARD};
+use aeron_protocols::logitech_g::{self, TriggerSettings, SIDE_BUTTON_BACK, SIDE_BUTTON_FORWARD};
+use aeron_protocols::logitech_keyboard::{BacklightConfig, BacklightEffect};
 use aeron_protocols::models::{
     AccessoryButtonAction, MxMasterOptions, MxMasterState, MxThumbwheelAction,
 };
@@ -237,6 +238,10 @@ pub struct MxLive {
     pub is_charging: bool,
     pub features: MxFeatures,
     pub dirty: bool,
+    /// Saved DPI should be written back on connect.
+    pub reapply_dpi: bool,
+    /// Saved SmartShift should be written back on connect.
+    pub reapply_smart_shift: bool,
     pressed: HashSet<u16>,
     gesture: GestureTracker,
     scroll: ScrollState,
@@ -244,7 +249,12 @@ pub struct MxLive {
 }
 
 impl MxLive {
-    pub fn from_state(device_index: u8, mx: &MxMasterState) -> Self {
+    pub fn from_state(
+        device_index: u8,
+        mx: &MxMasterState,
+        reapply_dpi: bool,
+        reapply_smart_shift: bool,
+    ) -> Self {
         Self {
             device_index,
             options: options_from_state(mx),
@@ -256,6 +266,8 @@ impl MxLive {
             is_charging: mx.is_charging,
             features: MxFeatures::default(),
             dirty: true,
+            reapply_dpi,
+            reapply_smart_shift,
             pressed: HashSet::new(),
             gesture: GestureTracker::default(),
             scroll: ScrollState::default(),
@@ -272,7 +284,7 @@ impl MxLive {
         let Some(norm) = hidpp::normalize_report(report) else {
             return Vec::new();
         };
-        if norm.len() < 4 {
+        if norm.len() < 4 || norm[1] != self.device_index {
             return Vec::new();
         }
         let feature = norm[2];
@@ -487,6 +499,16 @@ pub struct KeyboardLive {
     pub keys: Vec<KeyControl>,
     pub actions: HashMap<u8, AccessoryButtonAction>,
     pub dirty: bool,
+    pub battery_percent: Option<u8>,
+    pub is_charging: bool,
+    pub battery_unified: Option<u8>,
+    pub battery_legacy: Option<u8>,
+    pub backlight: Option<BacklightConfig>,
+    pub backlight_effect: Option<BacklightEffect>,
+    pub fn_standard: Option<bool>,
+    pub current_host: Option<u8>,
+    /// CIDs this app diverted. Keys outside this set are never handed back.
+    pub diverted: HashSet<u16>,
     pressed: HashSet<u16>,
 }
 
@@ -498,15 +520,30 @@ impl KeyboardLive {
             keys: Vec::new(),
             actions,
             dirty: true,
+            battery_percent: None,
+            is_charging: false,
+            battery_unified: None,
+            battery_legacy: None,
+            backlight: None,
+            backlight_effect: None,
+            fn_standard: None,
+            current_host: None,
+            diverted: HashSet::new(),
             pressed: HashSet::new(),
         }
     }
 
     pub fn handle_report(&mut self, report: &[u8]) -> Vec<InputEffect> {
+        let Some(norm) = hidpp::normalize_report(report) else {
+            return Vec::new();
+        };
+        if norm.len() < 4 || norm[1] != self.device_index {
+            return Vec::new();
+        }
         let Some(index) = self.reprog else {
             return Vec::new();
         };
-        let Some(cids) = hidpp::parse_diverted_buttons_event(report, index) else {
+        let Some(cids) = hidpp::parse_diverted_buttons_event(&norm, index) else {
             return Vec::new();
         };
         let pressed: HashSet<u16> = cids.into_iter().collect();
@@ -537,6 +574,18 @@ pub struct GMouseLive {
     pub forward: AccessoryButtonAction,
     pub dirty: bool,
     pub spying: bool,
+    pub dpi: u16,
+    pub lift_off: u8,
+    pub report_rate_hz: u16,
+    pub triggers: TriggerSettings,
+    pub reapply_dpi: bool,
+    pub reapply_rate: bool,
+    pub saves_profile: bool,
+    pub profile_dirty: bool,
+    pub battery_percent: Option<u8>,
+    pub is_charging: bool,
+    pub battery_unified: Option<u8>,
+    pub battery_legacy: Option<u8>,
     last_mask: u16,
 }
 
@@ -550,6 +599,18 @@ impl GMouseLive {
             forward,
             dirty: true,
             spying: false,
+            dpi: 1600,
+            lift_off: 1,
+            report_rate_hz: 1000,
+            triggers: TriggerSettings::default(),
+            reapply_dpi: false,
+            reapply_rate: false,
+            saves_profile: false,
+            profile_dirty: true,
+            battery_percent: None,
+            is_charging: false,
+            battery_unified: None,
+            battery_legacy: None,
             last_mask: 0,
         }
     }
@@ -560,10 +621,16 @@ impl GMouseLive {
     }
 
     pub fn handle_report(&mut self, report: &[u8]) -> Vec<InputEffect> {
+        let Some(norm) = hidpp::normalize_report(report) else {
+            return Vec::new();
+        };
+        if norm.len() < 4 || norm[1] != self.device_index {
+            return Vec::new();
+        }
         let Some(index) = self.spy else {
             return Vec::new();
         };
-        let Some(mask) = logitech_g::parse_button_spy_event(report, index) else {
+        let Some(mask) = logitech_g::parse_button_spy_event(&norm, index) else {
             return Vec::new();
         };
         let previous = self.last_mask;

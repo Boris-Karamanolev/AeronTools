@@ -58,8 +58,8 @@ pushd "${REPO_ROOT}" >/dev/null
 
 if [[ "$UNIVERSAL" == true ]]; then
   echo "==> Building aeron-ffi (universal: aarch64-apple-darwin + x86_64-apple-darwin, ${PROFILE}, macOS ${MACOSX_DEPLOYMENT_TARGET})..."
-  cargo build -p aeron-ffi --lib "${CARGO_PROFILE_FLAG[@]}" --target aarch64-apple-darwin
-  cargo build -p aeron-ffi --lib "${CARGO_PROFILE_FLAG[@]}" --target x86_64-apple-darwin
+  cargo build -p aeron-ffi --lib ${CARGO_PROFILE_FLAG+"${CARGO_PROFILE_FLAG[@]}"} --target aarch64-apple-darwin
+  cargo build -p aeron-ffi --lib ${CARGO_PROFILE_FLAG+"${CARGO_PROFILE_FLAG[@]}"} --target x86_64-apple-darwin
 
   ARM_LIB="${REPO_ROOT}/target/aarch64-apple-darwin/${PROFILE}/libaeron_ffi.a"
   X86_LIB="${REPO_ROOT}/target/x86_64-apple-darwin/${PROFILE}/libaeron_ffi.a"
@@ -67,7 +67,7 @@ if [[ "$UNIVERSAL" == true ]]; then
   BINDGEN_LIB="${REPO_ROOT}/target/${HOST_TARGET}/${PROFILE}/libaeron_ffi.a"
 else
   echo "==> Building aeron-ffi (${HOST_TARGET}, ${PROFILE}, macOS ${MACOSX_DEPLOYMENT_TARGET})..."
-  cargo build -p aeron-ffi --lib "${CARGO_PROFILE_FLAG[@]}" --target "${HOST_TARGET}"
+  cargo build -p aeron-ffi --lib ${CARGO_PROFILE_FLAG+"${CARGO_PROFILE_FLAG[@]}"} --target "${HOST_TARGET}"
   BINDGEN_LIB="${REPO_ROOT}/target/${HOST_TARGET}/${PROFILE}/libaeron_ffi.a"
   cp "${BINDGEN_LIB}" "${BUILD_DIR}/libaeron_ffi.a"
 fi

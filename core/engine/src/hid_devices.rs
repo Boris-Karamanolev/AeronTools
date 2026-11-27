@@ -41,6 +41,10 @@ pub struct HidManager {
     keychron_settings_block: Option<KeychronSettingsBlock>,
     razer_dock_path: Option<String>,
     sessions: Vec<PathSession>,
+    stored: accessory_store::Stored,
+    mx_backlight: Option<BacklightConfig>,
+    g_mouse_primed: bool,
+    g_keyboard_primed: bool,
 }
 
 impl Default for HidManager {
@@ -62,7 +66,7 @@ struct ScanSeen {
 impl HidManager {
     pub fn new() -> Self {
         let mut state = default_accessories_snapshot();
-        accessory_store::apply(&mut state);
+        let stored = accessory_store::apply(&mut state);
         Self {
             api: None,
             api_thread: None,
@@ -76,6 +80,10 @@ impl HidManager {
             keychron_settings_block: None,
             razer_dock_path: None,
             sessions: Vec::new(),
+            stored,
+            mx_backlight: None,
+            g_mouse_primed: false,
+            g_keyboard_primed: false,
         }
     }
 
@@ -91,8 +99,10 @@ impl HidManager {
                 snap.mx_master.wheel_mode = mx.wheel_mode;
                 snap.mx_master.smart_shift_enabled = mx.smart_shift_enabled;
                 snap.mx_master.smart_shift_threshold = mx.smart_shift_threshold;
-                snap.mx_master.battery_percent = mx.battery_percent;
-                snap.mx_master.is_charging = mx.is_charging;
+                if let Some(percent) = mx.battery_percent {
+                    snap.mx_master.battery_percent = Some(percent);
+                    snap.mx_master.is_charging = mx.is_charging;
+                }
                 snap.mx_master.standard_vertical_scroll = options.standard_vertical_scroll;
                 snap.mx_master.smooth_scrolling = options.smooth_scrolling;
                 snap.mx_master.scroll_speed_multiplier = options.scroll_speed_multiplier;
@@ -113,10 +123,43 @@ impl HidManager {
             }
             if let Some(keyboard) = &live.keyboard {
                 snap.mx_keyboard.key_actions = keyboard.actions.clone();
+                if let Some(percent) = keyboard.battery_percent {
+                    snap.mx_keyboard.battery_percent = Some(percent);
+                    snap.mx_keyboard.is_charging = keyboard.is_charging;
+                }
+                if let Some(cfg) = &keyboard.backlight {
+                    snap.mx_keyboard.backlight_enabled = cfg.is_enabled;
+                    snap.mx_keyboard.automatic_brightness = cfg.is_automatic_brightness();
+                    snap.mx_keyboard.battery_saving = cfg.is_battery_saving();
+                    snap.mx_keyboard.backlight_level = cfg.level;
+                    snap.mx_keyboard.duration_seconds = cfg.duration_seconds();
+                    let effects = cfg.supported_effects();
+                    if !effects.is_empty() {
+                        snap.mx_keyboard.supported_effects = effects;
+                    }
+                }
+                if let Some(effect) = keyboard.backlight_effect {
+                    snap.mx_keyboard.backlight_effect = effect;
+                }
+                if let Some(standard) = keyboard.fn_standard {
+                    snap.mx_keyboard.fn_inversion = Some(standard);
+                }
+                if let Some(host) = keyboard.current_host {
+                    snap.mx_keyboard.current_host = Some(host);
+                }
             }
             if let Some(mouse) = &live.g_mouse {
                 snap.logitech_g_mouse.back_button_action = mouse.back;
                 snap.logitech_g_mouse.forward_button_action = mouse.forward;
+                snap.logitech_g_mouse.dpi = mouse.dpi;
+                snap.logitech_g_mouse.lift_off_distance = mouse.lift_off;
+                snap.logitech_g_mouse.report_rate_hz = mouse.report_rate_hz;
+                snap.logitech_g_mouse.triggers = Some(mouse.triggers);
+                snap.logitech_g_mouse.saves_to_onboard_profile = mouse.saves_profile;
+                if let Some(percent) = mouse.battery_percent {
+                    snap.logitech_g_mouse.battery_percent = Some(percent);
+                    snap.logitech_g_mouse.is_charging = mouse.is_charging;
+                }
             }
         }
         snap
@@ -147,6 +190,9 @@ impl HidManager {
         if self.api.is_none() {
             match HidApi::new() {
                 Ok(api) => {
+                    // hidapi seizes devices on macOS by default; share them like the old IOHIDManager code did.
+                    #[cfg(target_os = "macos")]
+                    api.set_open_exclusive(false);
                     self.api = Some(api);
                     self.api_thread = Some(current);
                 }
@@ -282,8 +328,10 @@ impl HidManager {
             self.state.logitech_g_mouse.connection = None;
             self.state.logitech_g_mouse.battery_percent = None;
             self.state.logitech_g_mouse.is_charging = false;
+            self.g_mouse_primed = false;
         }
         if !seen.logitech_g_keyboard {
+            self.g_keyboard_primed = false;
             self.state.logitech_g_keyboard.connected = false;
             self.state.logitech_g_keyboard.connection = None;
             self.state.logitech_g_keyboard.battery_percent = None;
@@ -373,18 +421,36 @@ impl HidManager {
             return;
         };
         let runtime = DeviceRuntime {
-            mx: interest
-                .mx
-                .map(|index| MxLive::from_state(index, &self.state.mx_master)),
+            mx: interest.mx.map(|index| {
+                MxLive::from_state(
+                    index,
+                    &self.state.mx_master,
+                    self.stored.mx_dpi,
+                    self.stored.mx_smart_shift,
+                )
+            }),
             keyboard: interest.keyboard.map(|index| {
                 KeyboardLive::new(index, self.state.mx_keyboard.key_actions.clone())
             }),
             g_mouse: interest.g_mouse.map(|index| {
-                GMouseLive::new(
+                let mut mouse = GMouseLive::new(
                     index,
                     self.state.logitech_g_mouse.back_button_action,
                     self.state.logitech_g_mouse.forward_button_action,
-                )
+                );
+                mouse.dpi = self.state.logitech_g_mouse.dpi;
+                mouse.lift_off = self.state.logitech_g_mouse.lift_off_distance;
+                mouse.report_rate_hz = self.state.logitech_g_mouse.report_rate_hz;
+                mouse.triggers = self
+                    .state
+                    .logitech_g_mouse
+                    .triggers
+                    .unwrap_or_default();
+                mouse.reapply_dpi = self.stored.g_dpi;
+                mouse.reapply_rate = self.stored.g_report_rate;
+                mouse.saves_profile = self.state.logitech_g_mouse.saves_to_onboard_profile;
+                mouse.profile_dirty = true;
+                mouse
             }),
             pending: Vec::new(),
         };
@@ -456,7 +522,7 @@ impl HidManager {
                 && norm[3] == packet[2]
                 && norm[4] == packet[3]
             {
-                return Some(norm);
+                return None;
             }
             if norm[2] == packet[2] && norm[3] == packet[3] {
                 return Some(norm);
@@ -596,6 +662,10 @@ impl HidManager {
         let is_unifying = pid == hidpp::UNIFYING_RECEIVER_PRODUCT_ID;
         let is_lightspeed = hidpp::LIGHTSPEED_RECEIVER_PRODUCT_IDS.contains(&pid);
         let is_receiver = is_bolt || is_unifying || is_lightspeed;
+        if is_receiver {
+            // Register 0x00 bit 8: wireless connect/disconnect notifications (HID++ 1.0 0x41).
+            let _ = dev.write(&[0x10, 0xFF, 0x80, 0x00, 0x00, 0x01, 0x00]);
+        }
 
         let connection = if is_bolt {
             AccessoryConnection::LogiBolt
@@ -685,13 +755,13 @@ impl HidManager {
                             self.state.logitech_g_mouse.name = p.name.clone();
                             self.state.logitech_g_mouse.connection = Some(connection);
                         }
-                    } else if p.kind.is_keyboard() {
+                    } else if p.kind.is_keyboard() || is_mx_keyboard_name(&lower) {
                         seen.mx_keyboard = true;
                         self.mx_keyboard_path = Some((path.to_string(), dev_idx));
                         self.state.mx_keyboard.connected = true;
                         self.state.mx_keyboard.name = p.name.clone();
                         self.state.mx_keyboard.connection = Some(connection);
-                    } else if p.kind.is_pointing_device() {
+                    } else if p.kind.is_pointing_device() || is_mx_master_name(&lower) {
                         seen.mx_master = true;
                         self.mx_master_path = Some((path.to_string(), dev_idx));
                         self.state.mx_master.connected = true;
@@ -751,19 +821,38 @@ impl HidManager {
                     self.resolve_feature(&dev, dev_idx, hidpp::FEATURE_ADJUSTABLE_DPI)
                 {
                     let pkt = hidpp::get_sensor_dpi_packet(dev_idx, dpi_idx, 0);
-                    if let Some(rep) = self.hidpp_request(&dev, &pkt) {
-                        if let Some(dpi) = hidpp::parse_sensor_dpi_reply(&rep, dpi_idx) {
-                            self.state.mx_master.dpi = dpi;
+                    if !self.stored.mx_dpi {
+                        if let Some(rep) = self.hidpp_request(&dev, &pkt) {
+                            if let Some(dpi) = hidpp::parse_sensor_dpi_reply(&rep, dpi_idx) {
+                                self.state.mx_master.dpi = dpi;
+                            }
                         }
                     }
                 }
                 let ss_pkt = hidpp::get_smart_shift_packet(dev_idx, smart_idx, is_enhanced);
-                if let Some(rep) = self.hidpp_request(&dev, &ss_pkt) {
-                    if let Some(ss) = hidpp::parse_smart_shift_reply(&rep, smart_idx) {
-                        self.state.mx_master.wheel_mode = ss.wheel_mode;
-                        self.state.mx_master.smart_shift_enabled = ss.smart_shift_enabled;
-                        self.state.mx_master.smart_shift_threshold = ss.threshold;
+                if !self.stored.mx_smart_shift {
+                    if let Some(rep) = self.hidpp_request(&dev, &ss_pkt) {
+                        if let Some(ss) = hidpp::parse_smart_shift_reply(&rep, smart_idx) {
+                            self.state.mx_master.wheel_mode = ss.wheel_mode;
+                            self.state.mx_master.smart_shift_enabled = ss.smart_shift_enabled;
+                            self.state.mx_master.smart_shift_threshold = ss.threshold;
+                        }
                     }
+                }
+                continue;
+            }
+
+            if is_mx_master_name(&lower_name) {
+                seen.mx_master = true;
+                self.mx_master_path = Some((path.to_string(), dev_idx));
+                self.state.mx_master.connected = true;
+                if let Some(name) = resolved_name.clone() {
+                    self.state.mx_master.name = name;
+                }
+                self.state.mx_master.connection = Some(connection);
+                if let Some(b) = battery {
+                    self.state.mx_master.battery_percent = Some(b.percentage);
+                    self.state.mx_master.is_charging = b.is_charging;
                 }
                 continue;
             }
@@ -791,10 +880,12 @@ impl HidManager {
                         hidpp::SOFTWARE_ID,
                         &[0x00],
                     );
-                    if let Some(rep) = self.hidpp_request(&dev, &pkt) {
-                        if let Some(s) = logitech_g::parse_sensor_dpi(&rep) {
-                            self.state.logitech_g_mouse.dpi = s.dpi;
-                            self.state.logitech_g_mouse.lift_off_distance = s.lift_off_distance;
+                    if !self.stored.g_dpi {
+                        if let Some(rep) = self.hidpp_request(&dev, &pkt) {
+                            if let Some(s) = logitech_g::parse_sensor_dpi(&rep) {
+                                self.state.logitech_g_mouse.dpi = s.dpi;
+                                self.state.logitech_g_mouse.lift_off_distance = s.lift_off_distance;
+                            }
                         }
                     }
                 }
@@ -811,9 +902,11 @@ impl HidManager {
                     }
                     let get_pkt =
                         hidpp::make_long_packet(dev_idx, rr_idx, 2, hidpp::SOFTWARE_ID, &[]);
-                    if let Some(rep) = self.hidpp_request(&dev, &get_pkt) {
-                        if let Some(hz) = logitech_g::parse_report_rate(&rep) {
-                            self.state.logitech_g_mouse.report_rate_hz = hz;
+                    if !self.stored.g_report_rate {
+                        if let Some(rep) = self.hidpp_request(&dev, &get_pkt) {
+                            if let Some(hz) = logitech_g::parse_report_rate(&rep) {
+                                self.state.logitech_g_mouse.report_rate_hz = hz;
+                            }
                         }
                     }
                 }
@@ -823,11 +916,14 @@ impl HidManager {
                     let get_pkt =
                         hidpp::make_long_packet(dev_idx, trig_idx, 0, hidpp::SOFTWARE_ID, &[0x00]);
                     if let Some(rep) = self.hidpp_request(&dev, &get_pkt) {
-                        if let Some(t) = logitech_g::parse_trigger_settings(&rep) {
-                            self.state.logitech_g_mouse.triggers = Some(t);
-                        }
+                        // Function 0 is getInfo (limits), not the current trigger levels.
+                        let _ = logitech_g::parse_trigger_limits(&rep);
                     }
                 }
+                if self.state.logitech_g_mouse.triggers.is_none() {
+                    self.state.logitech_g_mouse.triggers = Some(TriggerSettings::default());
+                }
+                self.prime_g_mouse(&dev, dev_idx);
                 continue;
             }
 
@@ -867,7 +963,9 @@ impl HidManager {
                         hidpp::make_long_packet(dev_idx, br_idx, 1, hidpp::SOFTWARE_ID, &[]);
                     if let Some(rep) = self.hidpp_request(&dev, &pkt) {
                         if let Some(level) = logitech_keyboard::parse_brightness_level(&rep) {
-                            self.state.logitech_g_keyboard.brightness = level;
+                            if !self.stored.g_lighting {
+                                self.state.logitech_g_keyboard.brightness = level;
+                            }
                         }
                     }
                 }
@@ -921,6 +1019,7 @@ impl HidManager {
                         }
                     }
                 }
+                self.prime_g_keyboard(&dev, dev_idx);
                 continue;
             }
 
@@ -932,9 +1031,7 @@ impl HidManager {
             if bl_idx.is_some()
                 || fn_idx.is_some()
                 || is_keyboard_kind
-                || lower_name.contains("mx mechanical")
-                || lower_name.contains("mx mchncl")
-                || lower_name.contains("mx keys")
+                || is_mx_keyboard_name(&lower_name)
             {
                 seen.mx_keyboard = true;
                 self.mx_keyboard_path = Some((path.to_string(), dev_idx));
@@ -952,6 +1049,7 @@ impl HidManager {
                         hidpp::make_long_packet(dev_idx, bl_idx, 0, hidpp::SOFTWARE_ID, &[]);
                     if let Some(rep) = self.hidpp_request(&dev, &pkt) {
                         if let Some(cfg) = logitech_keyboard::parse_backlight_config(&rep) {
+                            self.mx_backlight = Some(cfg);
                             self.state.mx_keyboard.backlight_enabled = cfg.is_enabled;
                             self.state.mx_keyboard.automatic_brightness =
                                 cfg.is_automatic_brightness();
@@ -1019,7 +1117,7 @@ impl HidManager {
         dev.write(&with_id).ok()?;
         let mut buf = [0u8; 65];
         for _ in 0..8 {
-            let n = dev.read_timeout(&mut buf, 140).ok()?;
+            let n = dev.read_timeout(&mut buf, 1000).ok()?;
             if n == 0 {
                 return None;
             }
@@ -1089,11 +1187,13 @@ impl HidManager {
 
         let settings_pkt = keychron::packet(keychron::Command::READ_SETTINGS, routed, &[]);
         if let Some(rep) = self.keychron_request(&dev, &settings_pkt) {
-            if let Some(block) = KeychronSettingsBlock::parse(&rep) {
+            if let Some(mut block) = KeychronSettingsBlock::parse(&rep) {
                 let count = block.stage_count();
                 self.state.keychron_m3_mini.stage_dpis =
                     (0..count).map(|i| block.dpi(i)).collect();
-                self.state.keychron_m3_mini.active_stage = block.active_stage();
+                let stage = power.active_stage.min(count.saturating_sub(1) as u8);
+                block.set_active_stage(stage);
+                self.state.keychron_m3_mini.active_stage = stage;
                 if let Some(hz) = block.report_rate_hz() {
                     self.state.keychron_m3_mini.report_rate_hz = hz;
                 }
@@ -1103,6 +1203,29 @@ impl HidManager {
                 self.keychron_settings_block = Some(block);
             }
         }
+        self.read_keychron_buttons(&dev, routed);
+    }
+
+    fn read_keychron_buttons(&mut self, dev: &HidDevice, routed: bool) {
+        let packet = keychron::packet(keychron::Command::READ_BUTTONS, routed, &[]);
+        let Some(reply) = self.keychron_request(dev, &packet) else {
+            return;
+        };
+        #[cfg(target_os = "macos")]
+        {
+            if let Some(entry) = keychron::button_entry(&reply, keychron::BUTTON_BACK) {
+                if let Some(action) = crate::input_perform::action_for_keychron(entry, true) {
+                    self.state.keychron_m3_mini.back_button_action = action;
+                }
+            }
+            if let Some(entry) = keychron::button_entry(&reply, keychron::BUTTON_FORWARD) {
+                if let Some(action) = crate::input_perform::action_for_keychron(entry, false) {
+                    self.state.keychron_m3_mini.forward_button_action = action;
+                }
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = reply;
     }
 
     fn razer_request(&self, dev: &HidDevice, pkt: &[u8; 90]) -> Option<Vec<u8>> {
@@ -1157,8 +1280,14 @@ impl HidManager {
     // MARK: - Device Mutators
 
     pub fn set_mx_master_dpi(&mut self, dpi: u16) {
-        let clamped = hidpp::clamp_mx_dpi(dpi, 200, 8000, 50);
+        let clamped = hidpp::clamp_mx_dpi(
+            dpi,
+            self.state.mx_master.min_dpi,
+            self.state.mx_master.max_dpi,
+            self.state.mx_master.dpi_step,
+        );
         self.state.mx_master.dpi = clamped;
+        self.stored.mx_dpi = true;
         if let Some((ref path, dev_idx)) = self.mx_master_path.clone() {
             if self.session_interest(path).is_some() {
                 let path = path.clone();
@@ -1166,6 +1295,7 @@ impl HidManager {
                     if let Ok(mut live) = session.runtime.lock() {
                         if let Some(mx) = live.mx.as_mut() {
                             mx.dpi = clamped;
+                            mx.reapply_dpi = true;
                         }
                         live.pending.push(DeviceWrite::MxDpi(clamped));
                     }
@@ -1191,6 +1321,7 @@ impl HidManager {
         threshold: u8,
     ) {
         let clamped = hidpp::clamp_smart_shift_threshold(threshold);
+        self.stored.mx_smart_shift = true;
         self.state.mx_master.wheel_mode = wheel_mode;
         self.state.mx_master.smart_shift_enabled = smart_shift_enabled;
         self.state.mx_master.smart_shift_threshold = clamped;
@@ -1203,6 +1334,7 @@ impl HidManager {
                             mx.wheel_mode = wheel_mode;
                             mx.smart_shift_enabled = smart_shift_enabled;
                             mx.smart_shift_threshold = clamped;
+                            mx.reapply_smart_shift = true;
                         }
                         live.pending.push(DeviceWrite::MxSmartShift {
                             mode: wheel_mode,
@@ -1276,6 +1408,7 @@ impl HidManager {
             self.state.logitech_g_mouse.max_dpi,
         );
         self.state.logitech_g_mouse.dpi = clamped;
+        self.stored.g_dpi = true;
         let lod = self.state.logitech_g_mouse.lift_off_distance;
         if let Some((ref path, dev_idx)) = self.logitech_g_mouse_path.clone() {
             if self.session_interest(path).is_some() {
@@ -1283,6 +1416,7 @@ impl HidManager {
                 accessory_store::save(&self.state);
                 return;
             }
+            accessory_store::save(&self.state);
             if let Some(dev) = self.open_path(path) {
                 if let Some(fidx) =
                     self.resolve_feature(&dev, dev_idx, logitech_g::FEATURE_EXTENDED_DPI)
@@ -1306,6 +1440,8 @@ impl HidManager {
             return;
         };
         self.state.logitech_g_mouse.report_rate_hz = hz;
+        self.stored.g_report_rate = true;
+        accessory_store::save(&self.state);
         if let Some((ref path, dev_idx)) = self.logitech_g_mouse_path.clone() {
             if self.session_interest(path).is_some() {
                 self.enqueue(path, DeviceWrite::GReportRate(hz));
@@ -1330,6 +1466,8 @@ impl HidManager {
 
     pub fn set_logitech_g_triggers(&mut self, triggers: TriggerSettings) {
         self.state.logitech_g_mouse.triggers = Some(triggers);
+        self.stored.g_triggers = true;
+        accessory_store::save(&self.state);
         if let Some((ref path, dev_idx)) = self.logitech_g_mouse_path.clone() {
             if self.session_interest(path).is_some() {
                 self.enqueue(path, DeviceWrite::GTriggers(triggers));
@@ -1370,6 +1508,8 @@ impl HidManager {
                     if let Some(mouse) = live.g_mouse.as_mut() {
                         mouse.back = back_button;
                         mouse.forward = forward_button;
+                        mouse.saves_profile = saves_to_onboard_profile;
+                        mouse.profile_dirty = true;
                         mouse.dirty = true;
                     }
                 }
@@ -1412,7 +1552,13 @@ impl HidManager {
                 if let Some(fidx) =
                     self.resolve_feature(&dev, dev_idx, logitech_keyboard::FEATURE_BACKLIGHT)
                 {
-                    let mut cfg = BacklightConfig {
+                    if self.mx_backlight.is_none() {
+                        let read = hidpp::make_long_packet(dev_idx, fidx, 0, hidpp::SOFTWARE_ID, &[]);
+                        if let Some(rep) = self.hidpp_request(&dev, &read) {
+                            self.mx_backlight = logitech_keyboard::parse_backlight_config(&rep);
+                        }
+                    }
+                    let mut cfg = self.mx_backlight.unwrap_or(BacklightConfig {
                         is_enabled: enabled,
                         options: 0,
                         supported: 0xFF,
@@ -1421,9 +1567,13 @@ impl HidManager {
                         duration_away: (self.state.mx_keyboard.duration_seconds / 5).max(1),
                         duration_typing: (self.state.mx_keyboard.duration_seconds / 5).max(1),
                         duration_charging: (self.state.mx_keyboard.duration_seconds / 5).max(1),
-                    };
+                    });
+                    cfg.is_enabled = enabled;
+                    cfg.level = self.state.mx_keyboard.backlight_level;
+                    cfg.set_duration_seconds(self.state.mx_keyboard.duration_seconds);
                     cfg.set_automatic_brightness(auto_brightness);
                     cfg.set_battery_saving(battery_saving);
+                    self.mx_backlight = Some(cfg);
                     let params = logitech_keyboard::set_backlight_config_params(&cfg);
                     let pkt = hidpp::make_long_packet(
                         dev_idx,
@@ -1497,8 +1647,11 @@ impl HidManager {
     }
 
     pub fn set_g_keyboard_lighting(&mut self, brightness: u16, lighting: RgbLighting) {
+        let lighting_changed = self.state.logitech_g_keyboard.lighting != lighting;
         self.state.logitech_g_keyboard.brightness = brightness;
         self.state.logitech_g_keyboard.lighting = lighting;
+        self.stored.g_lighting = true;
+        accessory_store::save(&self.state);
         if let Some((ref path, dev_idx)) = self.logitech_g_keyboard_path.clone() {
             if let Some(dev) = self.open_path(path) {
                 if let Some(br_idx) = self.resolve_feature(
@@ -1516,34 +1669,34 @@ impl HidManager {
                     );
                     let _ = self.hidpp_request(&dev, &pkt);
                 }
-                if let Some(rgb_idx) =
-                    self.resolve_feature(&dev, dev_idx, logitech_keyboard::FEATURE_RGB_EFFECTS)
-                {
-                    // Take host lighting control (same as G HUB & LogitechG515Connector.swift)
-                    let host_ctrl = hidpp::make_long_packet(
-                        dev_idx,
-                        rgb_idx,
-                        5,
-                        hidpp::SOFTWARE_ID,
-                        &[0x01, 0x03, 0x05],
-                    );
-                    let _ = self.hidpp_request(&dev, &host_ctrl);
+                if lighting_changed {
+                    if let Some(rgb_idx) =
+                        self.resolve_feature(&dev, dev_idx, logitech_keyboard::FEATURE_RGB_EFFECTS)
+                    {
+                        // Take host lighting control (same as G HUB & LogitechG515Connector.swift)
+                        let host_ctrl = hidpp::make_long_packet(
+                            dev_idx,
+                            rgb_idx,
+                            5,
+                            hidpp::SOFTWARE_ID,
+                            &[0x01, 0x03, 0x05],
+                        );
+                        let _ = self.hidpp_request(&dev, &host_ctrl);
 
-                    let effect_index = self
-                        .g_keyboard_effect_indices
-                        .get(&lighting.effect)
-                        .copied()
-                        .unwrap_or(0);
-                    let params =
-                        logitech_keyboard::set_rgb_effect_params(0, effect_index, &lighting);
-                    let pkt = hidpp::make_long_packet(
-                        dev_idx,
-                        rgb_idx,
-                        1,
-                        hidpp::SOFTWARE_ID,
-                        &params,
-                    );
-                    let _ = self.hidpp_request(&dev, &pkt);
+                        if let Some(&effect_index) = self.g_keyboard_effect_indices.get(&lighting.effect)
+                        {
+                            let params =
+                                logitech_keyboard::set_rgb_effect_params(0, effect_index, &lighting);
+                            let pkt = hidpp::make_long_packet(
+                                dev_idx,
+                                rgb_idx,
+                                1,
+                                hidpp::SOFTWARE_ID,
+                                &params,
+                            );
+                            let _ = self.hidpp_request(&dev, &pkt);
+                        }
+                    }
                 }
             }
         }
@@ -1558,6 +1711,11 @@ impl HidManager {
         motion_sync: bool,
         angle_snapping: bool,
     ) {
+        if self.state.keychron_m3_mini.connection == Some(AccessoryConnection::BluetoothLe)
+            && self.keychron_path.is_none()
+        {
+            return;
+        }
         let clamped_dpi = keychron::clamp_dpi(dpi);
         self.state.keychron_m3_mini.active_stage = active_stage;
         if let Some(slot) = self
@@ -1588,9 +1746,15 @@ impl HidManager {
             if let Some(dev) = self.open_path(&path) {
                 let write_pkt =
                     keychron::packet(keychron::Command::WRITE_SETTINGS, routed, &block.raw);
-                let _ = self.keychron_request(&dev, &write_pkt);
-                let save_pkt = keychron::packet(keychron::Command::SAVE, routed, &[]);
-                let _ = self.keychron_request(&dev, &save_pkt);
+                let mut written = self.keychron_request(&dev, &write_pkt);
+                if written.is_none() {
+                    std::thread::sleep(Duration::from_millis(500));
+                    written = self.keychron_request(&dev, &write_pkt);
+                }
+                if written.is_some() {
+                    let save_pkt = keychron::packet(keychron::Command::SAVE, routed, &[]);
+                    let _ = self.keychron_request(&dev, &save_pkt);
+                }
             }
         }
     }
@@ -1600,6 +1764,11 @@ impl HidManager {
         back_button: AccessoryButtonAction,
         forward_button: AccessoryButtonAction,
     ) {
+        if self.state.keychron_m3_mini.connection == Some(AccessoryConnection::BluetoothLe)
+            && self.keychron_path.is_none()
+        {
+            return;
+        }
         self.state.keychron_m3_mini.back_button_action = back_button;
         self.state.keychron_m3_mini.forward_button_action = forward_button;
         #[cfg(target_os = "macos")]
@@ -1617,6 +1786,7 @@ impl HidManager {
                 }
                 let save = keychron::packet(keychron::Command::SAVE, routed, &[]);
                 let _ = self.keychron_request(&dev, &save);
+                self.read_keychron_buttons(&dev, routed);
             }
         }
         accessory_store::save(&self.state);
@@ -1635,20 +1805,99 @@ impl HidManager {
         }
         if let Some(ref path) = self.razer_dock_path.clone() {
             if let Some(dev) = self.open_path(path) {
-                if let Some(b) = brightness {
-                    let pkt = razer_chroma::set_brightness_packet(b);
-                    let _ = self.razer_request(&dev, &pkt);
-                }
                 if let Some(ref l) = lighting {
                     if let Some(pkt) = razer_chroma::set_effect_packet(l) {
                         let _ = self.razer_request(&dev, &pkt);
                     }
+                }
+                if let Some(b) = brightness {
+                    let pkt = razer_chroma::set_brightness_packet(b);
+                    let _ = self.razer_request(&dev, &pkt);
                 }
             }
         } else {
             debug!("Razer dock lighting updated in state (hardware not attached)");
         }
     }
+
+    fn prime_g_mouse(&mut self, dev: &HidDevice, dev_idx: u8) {
+        if self.g_mouse_primed {
+            return;
+        }
+        self.g_mouse_primed = true;
+        if let Some(feature) = self.resolve_feature(dev, dev_idx, logitech_g::FEATURE_ONBOARD_PROFILES) {
+            let packet = hidpp::make_long_packet(dev_idx, feature, 1, hidpp::SOFTWARE_ID, &[0x02]);
+            let _ = self.hidpp_request(dev, &packet);
+        }
+        let triggers = self
+            .state
+            .logitech_g_mouse
+            .triggers
+            .unwrap_or_default();
+        if let Some(feature) = self.resolve_feature(dev, dev_idx, logitech_g::FEATURE_ANALOG_TRIGGERS) {
+            for key in [0u8, 1u8] {
+                let params = logitech_g::set_trigger_params(key, triggers);
+                let packet = hidpp::make_long_packet(dev_idx, feature, 1, hidpp::SOFTWARE_ID, &params);
+                let _ = self.hidpp_request(dev, &packet);
+            }
+        }
+        if self.stored.g_dpi {
+            if let Some(feature) = self.resolve_feature(dev, dev_idx, logitech_g::FEATURE_EXTENDED_DPI) {
+                let params = logitech_g::set_sensor_dpi_params(
+                    self.state.logitech_g_mouse.dpi,
+                    self.state.logitech_g_mouse.lift_off_distance,
+                );
+                let packet = hidpp::make_long_packet(dev_idx, feature, 6, hidpp::SOFTWARE_ID, &params);
+                let _ = self.hidpp_request(dev, &packet);
+            }
+        }
+        if self.stored.g_report_rate {
+            if let Some(index) = logitech_g::report_rate_index(self.state.logitech_g_mouse.report_rate_hz) {
+                if let Some(feature) =
+                    self.resolve_feature(dev, dev_idx, logitech_g::FEATURE_EXTENDED_REPORT_RATE)
+                {
+                    let packet = hidpp::make_long_packet(dev_idx, feature, 3, hidpp::SOFTWARE_ID, &[index]);
+                    let _ = self.hidpp_request(dev, &packet);
+                }
+            }
+        }
+    }
+
+    fn prime_g_keyboard(&mut self, dev: &HidDevice, dev_idx: u8) {
+        if self.g_keyboard_primed || !self.stored.g_lighting {
+            self.g_keyboard_primed = true;
+            return;
+        }
+        self.g_keyboard_primed = true;
+        let lighting = self.state.logitech_g_keyboard.lighting;
+        let brightness = self.state.logitech_g_keyboard.brightness;
+        if let Some(feature) = self.resolve_feature(dev, dev_idx, logitech_keyboard::FEATURE_BRIGHTNESS_CONTROL)
+        {
+            let params = logitech_keyboard::set_brightness_params(brightness);
+            let packet = hidpp::make_long_packet(dev_idx, feature, 2, hidpp::SOFTWARE_ID, &params);
+            let _ = self.hidpp_request(dev, &packet);
+        }
+        if let Some(feature) = self.resolve_feature(dev, dev_idx, logitech_keyboard::FEATURE_RGB_EFFECTS) {
+            let host = hidpp::make_long_packet(dev_idx, feature, 5, hidpp::SOFTWARE_ID, &[0x01, 0x03, 0x05]);
+            let _ = self.hidpp_request(dev, &host);
+            if let Some(&effect_index) = self.g_keyboard_effect_indices.get(&lighting.effect) {
+                let params = logitech_keyboard::set_rgb_effect_params(0, effect_index, &lighting);
+                let packet = hidpp::make_long_packet(dev_idx, feature, 1, hidpp::SOFTWARE_ID, &params);
+                let _ = self.hidpp_request(dev, &packet);
+            }
+        }
+    }
+}
+
+fn is_mx_master_name(name: &str) -> bool {
+    name.contains("mx master") || name.contains("mx mstr")
+}
+
+fn is_mx_keyboard_name(name: &str) -> bool {
+    name.contains("mx mchncl")
+        || name.contains("mx mechanical")
+        || name.contains("mx keys mini")
+        || name.contains("mx keys")
 }
 
 impl Drop for HidManager {
@@ -1719,11 +1968,7 @@ pub fn default_accessories_snapshot() -> AccessoriesSnapshot {
             report_rate_hz: 1000,
             supported_report_rates: vec![125, 250, 500, 1000, 2000, 4000, 8000],
             lift_off_distance: 1,
-            triggers: Some(TriggerSettings {
-                actuation: 5,
-                rapid_trigger: 0,
-                haptics: 2,
-            }),
+            triggers: Some(TriggerSettings::default()),
             back_button_action: AccessoryButtonAction::SystemDefault,
             forward_button_action: AccessoryButtonAction::SystemDefault,
             saves_to_onboard_profile: true,
@@ -1767,8 +2012,8 @@ pub fn default_accessories_snapshot() -> AccessoriesSnapshot {
             name: "Razer Thunderbolt 4 Dock Chroma".into(),
             firmware: None,
             serial_number: None,
-            brightness: Some(255),
-            lighting: Some(RazerLighting::default()),
+            brightness: None,
+            lighting: None,
             ports: DockLayout::empty_razer(),
         },
         satechi_hub: SatechiHubState {

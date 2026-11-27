@@ -2,6 +2,8 @@
 //! HID assignment a Keychron mouse stores and sends itself.
 
 use std::ffi::c_void;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use aeron_protocols::models::AccessoryButtonAction;
 use plist::Value;
@@ -42,7 +44,51 @@ pub fn scroll_sign(standard: bool) -> f64 {
     if standard {
         return 1.0;
     }
-    if natural_scrolling() { -1.0 } else { 1.0 }
+    if natural_scrolling_cached() { -1.0 } else { 1.0 }
+}
+
+pub fn hid_key_binding(action: AccessoryButtonAction) -> Option<(u8, u8)> {
+    let (code, flags) = shortcut(action)?;
+    hid_usage(code, flags)
+}
+
+pub fn action_for_keychron(entry: [u8; 4], back: bool) -> Option<AccessoryButtonAction> {
+    [
+        AccessoryButtonAction::NavigateBack,
+        AccessoryButtonAction::NavigateForward,
+        AccessoryButtonAction::MissionControl,
+        AccessoryButtonAction::AppExpose,
+        AccessoryButtonAction::ShowDesktop,
+        AccessoryButtonAction::SpaceLeft,
+        AccessoryButtonAction::SpaceRight,
+        AccessoryButtonAction::Copy,
+        AccessoryButtonAction::Paste,
+        AccessoryButtonAction::SystemDefault,
+    ]
+    .into_iter()
+    .find(|action| keychron_assignment(*action, back) == Some(entry))
+}
+
+fn natural_scrolling_cached() -> bool {
+    struct Cache {
+        at: Instant,
+        natural: bool,
+    }
+    static CACHE: Mutex<Option<Cache>> = Mutex::new(None);
+    if let Ok(mut guard) = CACHE.lock() {
+        if let Some(cache) = guard.as_ref() {
+            if cache.at.elapsed() < Duration::from_secs(5) {
+                return cache.natural;
+            }
+        }
+        let natural = natural_scrolling();
+        *guard = Some(Cache {
+            at: Instant::now(),
+            natural,
+        });
+        return natural;
+    }
+    natural_scrolling()
 }
 
 pub fn perform(effect: &InputEffect) {

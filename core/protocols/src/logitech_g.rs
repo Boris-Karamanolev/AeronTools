@@ -182,6 +182,18 @@ pub fn set_trigger_params(key: u8, settings: TriggerSettings) -> [u8; 4] {
     ]
 }
 
+/// `getInfo` (function 0). Limits are raw units at `[6]`, `[7]` and `[8]`.
+pub fn parse_trigger_limits(reply: &[u8]) -> Option<TriggerSettings> {
+    if reply.len() < 9 || reply[6] == 0 {
+        return None;
+    }
+    Some(TriggerSettings {
+        actuation: (reply[6] / TRIGGER_UNITS_PER_LEVEL).max(1),
+        rapid_trigger: reply[7] / TRIGGER_UNITS_PER_LEVEL,
+        haptics: reply[8] / TRIGGER_UNITS_PER_LEVEL,
+    })
+}
+
 pub fn parse_trigger_settings(reply: &[u8]) -> Option<TriggerSettings> {
     if reply.len() < 8 {
         return None;
@@ -205,6 +217,88 @@ pub fn button_map(button_count: usize, silenced: &HashSet<usize>) -> Vec<u8> {
     (1..=button_count.max(1))
         .map(|b| if silenced.contains(&b) { 0 } else { b as u8 })
         .collect()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OnboardProfilesInfo {
+    pub profile_format: u8,
+    pub sector_size: usize,
+}
+
+/// `getOnboardProfilesInfo` (function 0): `[5]` profile format, `[11…12]` sector size.
+pub fn parse_onboard_profiles_info(reply: &[u8]) -> Option<OnboardProfilesInfo> {
+    if reply.len() < 13 {
+        return None;
+    }
+    let sector_size = ((reply[11] as usize) << 8) | (reply[12] as usize);
+    (sector_size > 16).then_some(OnboardProfilesInfo {
+        profile_format: reply[5],
+        sector_size,
+    })
+}
+
+/// First enabled profile sector in the sector-0 directory.
+/// Entries are `[sector hi, sector lo, enabled, 0xFF]`, ended by `0xFFFF`.
+pub fn first_enabled_profile_sector(directory: &[u8]) -> Option<u16> {
+    let mut offset = 0;
+    while offset + 3 < directory.len() {
+        let sector = u16::from_be_bytes([directory[offset], directory[offset + 1]]);
+        if sector == 0xFFFF {
+            return None;
+        }
+        if directory[offset + 2] != 0 {
+            return Some(sector);
+        }
+        offset += 4;
+    }
+    None
+}
+
+pub fn read_memory_params(sector: u16, offset: usize) -> [u8; 4] {
+    [
+        (sector >> 8) as u8,
+        (sector & 0xFF) as u8,
+        (offset >> 8) as u8,
+        (offset & 0xFF) as u8,
+    ]
+}
+
+pub fn sector_read_offsets(sector_size: usize) -> Vec<usize> {
+    let mut offsets: Vec<usize> = (0..sector_size.saturating_sub(16)).step_by(16).collect();
+    offsets.push(sector_size - 16);
+    offsets
+}
+
+pub fn assemble_sector(chunks: &[Vec<u8>], sector_size: usize) -> Option<Vec<u8>> {
+    let offsets = sector_read_offsets(sector_size);
+    if chunks.len() != offsets.len() || chunks.iter().any(|chunk| chunk.len() < 16) {
+        return None;
+    }
+    let mut sector = vec![0u8; sector_size];
+    for (offset, chunk) in offsets.into_iter().zip(chunks) {
+        sector[offset..offset + 16].copy_from_slice(&chunk[..16]);
+    }
+    Some(sector)
+}
+
+pub fn write_memory_start_params(sector: u16, length: usize) -> [u8; 6] {
+    [
+        (sector >> 8) as u8,
+        (sector & 0xFF) as u8,
+        0x00,
+        0x00,
+        (length >> 8) as u8,
+        (length & 0xFF) as u8,
+    ]
+}
+
+pub fn mouse_button_binding(button: usize) -> [u8; 4] {
+    let mask = 1u16 << (button.saturating_sub(1) as u16);
+    [0x80, 0x01, (mask >> 8) as u8, (mask & 0xFF) as u8]
+}
+
+pub fn key_binding(usage: u8, modifiers: u8) -> [u8; 4] {
+    [0x80, 0x02, modifiers, usage]
 }
 
 /// CRC-16/CCITT (poly 0x1021, init 0xFFFF).

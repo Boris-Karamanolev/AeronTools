@@ -51,6 +51,20 @@ public enum AccessoryButtonAction: String, CaseIterable, Codable, Identifiable, 
 extension AccessoryButtonAction {
     /// Actions any accessory can offer; the wheel-mode toggle needs an MX Master.
     static let general: [AccessoryButtonAction] = allCases.filter { $0 != .toggleWheelMode }
+
+    /// Shortcuts the Keychron stores on the mouse. Matches the old `buttonActions` list.
+    static let keychron: [AccessoryButtonAction] = [
+        .systemDefault,
+        .navigateBack,
+        .navigateForward,
+        .missionControl,
+        .appExpose,
+        .showDesktop,
+        .spaceLeft,
+        .spaceRight,
+        .copy,
+        .paste,
+    ]
 }
 
 /// Performs button actions for every accessory by posting the system shortcut each action maps to.

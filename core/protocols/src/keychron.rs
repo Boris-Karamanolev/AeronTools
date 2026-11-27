@@ -51,6 +51,20 @@ pub fn packet(cmd: Command, routed: bool, payload: &[u8]) -> [u8; PACKET_LENGTH]
     pkt
 }
 
+pub const BUTTON_BACK: usize = 3;
+pub const BUTTON_FORWARD: usize = 4;
+
+/// One 4-byte button entry from a `READ_BUTTONS` reply. Slots are the button numbers.
+pub fn button_entry(report: &[u8], slot: usize) -> Option<[u8; 4]> {
+    let offset = 4 + slot * 4;
+    if report.len() < offset + 4 || report[3] != Command::READ_BUTTONS.sub {
+        return None;
+    }
+    let mut entry = [0u8; 4];
+    entry.copy_from_slice(&report[offset..offset + 4]);
+    Some(entry)
+}
+
 pub fn is_reply(report: &[u8], request: &[u8]) -> bool {
     report.len() > 3 && request.len() > 3 && report[0] == request[0] && report[3] == request[3]
 }

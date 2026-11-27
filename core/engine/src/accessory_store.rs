@@ -5,10 +5,24 @@ use std::fs;
 use std::path::PathBuf;
 
 use aeron_protocols::hidpp::MxWheelMode;
+use aeron_protocols::logitech_g::TriggerSettings;
+use aeron_protocols::logitech_keyboard::RgbLighting;
 use aeron_protocols::models::{AccessoriesSnapshot, AccessoryButtonAction, MxMasterOptions};
 use serde::{Deserialize, Serialize};
 
+/// Which user choices were actually in the file. Absent fields stay device-owned.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Stored {
+    pub mx_dpi: bool,
+    pub mx_smart_shift: bool,
+    pub g_dpi: bool,
+    pub g_report_rate: bool,
+    pub g_triggers: bool,
+    pub g_lighting: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
 struct AccessoryFile {
     mx: Option<MxMasterOptions>,
     mx_dpi: Option<u16>,
@@ -20,6 +34,16 @@ struct AccessoryFile {
     g_back: Option<AccessoryButtonAction>,
     g_forward: Option<AccessoryButtonAction>,
     g_saves_profile: Option<bool>,
+    #[serde(default)]
+    g_dpi: Option<u16>,
+    #[serde(default)]
+    g_report_rate_hz: Option<u16>,
+    #[serde(default)]
+    g_triggers: Option<TriggerSettings>,
+    #[serde(default)]
+    g_lighting: Option<RgbLighting>,
+    #[serde(default)]
+    g_brightness: Option<u16>,
     keychron_back: Option<AccessoryButtonAction>,
     keychron_forward: Option<AccessoryButtonAction>,
 }
@@ -28,15 +52,15 @@ fn path() -> Option<PathBuf> {
     dirs::config_dir().map(|dir| dir.join("AeronTools").join("accessories.json"))
 }
 
-pub fn apply(state: &mut AccessoriesSnapshot) {
+pub fn apply(state: &mut AccessoriesSnapshot) -> Stored {
     let Some(path) = path() else {
-        return;
+        return Stored::default();
     };
     let Ok(text) = fs::read_to_string(path) else {
-        return;
+        return Stored::default();
     };
     let Ok(saved) = serde_json::from_str::<AccessoryFile>(&text) else {
-        return;
+        return Stored::default();
     };
     if let Some(mx) = saved.mx {
         let slot = &mut state.mx_master;
@@ -91,6 +115,31 @@ pub fn apply(state: &mut AccessoriesSnapshot) {
     if let Some(forward) = saved.keychron_forward {
         state.keychron_m3_mini.forward_button_action = forward;
     }
+    if let Some(dpi) = saved.g_dpi {
+        state.logitech_g_mouse.dpi = dpi;
+    }
+    if let Some(hz) = saved.g_report_rate_hz {
+        state.logitech_g_mouse.report_rate_hz = hz;
+    }
+    if let Some(triggers) = saved.g_triggers {
+        state.logitech_g_mouse.triggers = Some(triggers);
+    }
+    if let Some(lighting) = saved.g_lighting {
+        state.logitech_g_keyboard.lighting = lighting;
+    }
+    if let Some(brightness) = saved.g_brightness {
+        state.logitech_g_keyboard.brightness = brightness;
+    }
+    Stored {
+        mx_dpi: saved.mx_dpi.is_some(),
+        mx_smart_shift: saved.mx_wheel_mode.is_some()
+            || saved.mx_smart_shift_enabled.is_some()
+            || saved.mx_smart_shift_threshold.is_some(),
+        g_dpi: saved.g_dpi.is_some(),
+        g_report_rate: saved.g_report_rate_hz.is_some(),
+        g_triggers: saved.g_triggers.is_some(),
+        g_lighting: saved.g_lighting.is_some(),
+    }
 }
 
 pub fn save(state: &AccessoriesSnapshot) {
@@ -113,6 +162,11 @@ pub fn save(state: &AccessoriesSnapshot) {
         g_back: Some(state.logitech_g_mouse.back_button_action),
         g_forward: Some(state.logitech_g_mouse.forward_button_action),
         g_saves_profile: Some(state.logitech_g_mouse.saves_to_onboard_profile),
+        g_dpi: Some(state.logitech_g_mouse.dpi),
+        g_report_rate_hz: Some(state.logitech_g_mouse.report_rate_hz),
+        g_triggers: state.logitech_g_mouse.triggers,
+        g_lighting: Some(state.logitech_g_keyboard.lighting),
+        g_brightness: Some(state.logitech_g_keyboard.brightness),
         keychron_back: Some(state.keychron_m3_mini.back_button_action),
         keychron_forward: Some(state.keychron_m3_mini.forward_button_action),
     };
