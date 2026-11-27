@@ -3,6 +3,7 @@
 //! Keychron 4K (receiver, USB cable, BLE), and Razer Chroma protocols across macOS, Linux, and Windows.
 
 use std::collections::{HashMap, HashSet};
+use std::thread::ThreadId;
 use std::time::Duration;
 
 use aeron_protocols::dock_topology::DockLayout;
@@ -27,6 +28,9 @@ use crate::input_session::{DeviceRuntime, DeviceWrite, Interest, PathSession};
 
 pub struct HidManager {
     api: Option<HidApi>,
+    /// Thread that created the IOHIDManager. macOS pins that manager to the
+    /// thread's run loop; enumerating elsewhere is a PAC trap in CFRunLoopAddSource.
+    api_thread: Option<ThreadId>,
     state: AccessoriesSnapshot,
     mx_master_path: Option<(String, u8)>,
     mx_keyboard_path: Option<(String, u8)>,
@@ -57,17 +61,11 @@ struct ScanSeen {
 
 impl HidManager {
     pub fn new() -> Self {
-        let api = match HidApi::new() {
-            Ok(a) => Some(a),
-            Err(err) => {
-                warn!("hidapi initialization failed: {err}");
-                None
-            }
-        };
         let mut state = default_accessories_snapshot();
         accessory_store::apply(&mut state);
         Self {
-            api,
+            api: None,
+            api_thread: None,
             state,
             mx_master_path: None,
             mx_keyboard_path: None,
@@ -142,10 +140,32 @@ impl HidManager {
         self.state.satechi_hub.ports = satechi;
     }
 
+    /// Creates the HID manager on the calling thread, or refuses to enumerate
+    /// if this thread is not the one that created it.
+    fn prepare_api(&mut self) -> bool {
+        let current = std::thread::current().id();
+        if self.api.is_none() {
+            match HidApi::new() {
+                Ok(api) => {
+                    self.api = Some(api);
+                    self.api_thread = Some(current);
+                }
+                Err(err) => {
+                    warn!("hidapi initialization failed: {err}");
+                    return false;
+                }
+            }
+        }
+        self.api_thread == Some(current)
+    }
+
     /// Re-enumerates HID devices and queries telemetry for any connected supported accessories.
     /// Paired wireless devices whose receiver is present stay `connected = true` even while asleep,
     /// preserving their last-read battery and feature state until they wake again or are unplugged.
     pub fn refresh(&mut self) {
+        if !self.prepare_api() {
+            return;
+        }
         let Some(api) = self.api.as_mut() else {
             return;
         };

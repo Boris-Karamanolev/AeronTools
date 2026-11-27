@@ -28,7 +28,7 @@ pub mod fallback;
 
 use std::fs;
 use std::path::PathBuf;
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -160,7 +160,8 @@ impl AeronCore {
         let mut hid_mgr = HidManager::new();
         let (razer_ports, satechi_ports) = backend.read_dock_layouts();
         hid_mgr.set_dock_layouts(razer_ports, satechi_ports);
-        hid_mgr.refresh();
+        // HID enumeration is started on the watcher thread. Doing it here would
+        // pin IOHIDManager to this thread and crash the next scan.
         let initial_hid_snapshot = hid_mgr.snapshot();
 
         let preferences = load_preferences();
@@ -238,9 +239,23 @@ impl AeronCore {
         let watcher_inner = Arc::downgrade(&inner);
         let watcher_hid = Arc::downgrade(&hid);
         let watcher_hid_snap = Arc::downgrade(&hid_snapshot);
+        let (hid_ready_tx, hid_ready_rx) = mpsc::channel();
         let _ = thread::Builder::new()
             .name("aeron-hw-watcher".into())
             .spawn(move || {
+                if let (Some(hid_arc), Some(snap_arc)) =
+                    (watcher_hid.upgrade(), watcher_hid_snap.upgrade())
+                {
+                    if let Ok(mut h) = hid_arc.lock() {
+                        h.refresh();
+                        let latest = h.snapshot();
+                        if let Ok(mut snap) = snap_arc.lock() {
+                            *snap = latest;
+                        }
+                    }
+                }
+                let _ = hid_ready_tx.send(());
+
                 let mut tick: u64 = 0;
                 loop {
                     thread::sleep(Duration::from_secs(1));
@@ -284,6 +299,7 @@ impl AeronCore {
                     }
                 }
             });
+        let _ = hid_ready_rx.recv_timeout(Duration::from_secs(3));
 
         Self {
             inner,
