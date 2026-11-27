@@ -116,9 +116,8 @@ From a git checkout the same installer is `platforms/steamos/install/install-ste
 
 ## Automated Builds & GitHub Releases (macOS, Windows, Linux / SteamOS)
 
-`.github/workflows/cross-platform.yml` builds three release files:
-- **On every push to `main` (or manual Run workflow):** Uploads them under **Actions → Artifacts**.
-- **On a version tag (`v*`), e.g. `git tag v0.1.0 && git push origin v0.1.0`:** Publishes a GitHub Release with those three files:
+`.github/workflows/cross-platform.yml` builds three release files. A version tag is one run: it builds them and publishes the GitHub Release. Pushing `main` does not start a second run. Pull requests still build, and **Run workflow** does too.
+- **On a version tag (`v*`), e.g. `git tag v1.1.0 && git push origin v1.1.0`:**
   - `Aeron-Tools-macOS-arm64.dmg` — native SwiftUI menu-bar app, Apple Silicon only
   - `Aeron-Tools-Linux.tar.gz` — Desktop Mode AppImage, plus `aeron-daemon`, the Decky plugin, and `install-steamos.sh` for Gaming Mode
   - `Aeron-Tools-Windows.exe` — portable executable, no installer
