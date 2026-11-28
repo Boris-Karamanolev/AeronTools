@@ -10,7 +10,7 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
 name = "aeron-daemon"
-version = "1.1.3"
+version = "1.1.4"
 dependencies = [
  "aeron-platform",
  "aeron-protocols",
@@ -25,7 +25,7 @@ dependencies = [
 
 [[package]]
 name = "aeron-ffi"
-version = "1.1.3"
+version = "1.1.4"
 dependencies = [
  "aeron-platform",
  "aeron-protocols",
@@ -35,7 +35,7 @@ dependencies = [
 
 [[package]]
 name = "aeron-platform"
-version = "1.1.3"
+version = "1.1.4"
 dependencies = [
  "aeron-protocols",
  "dirs 5.0.1",
@@ -50,14 +50,14 @@ dependencies = [
 
 [[package]]
 name = "aeron-protocols"
-version = "1.1.3"
+version = "1.1.4"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "aeron-tools-tauri"
-version = "1.1.3"
+version = "1.1.4"
 dependencies = [
  "aeron-daemon",
  "aeron-platform",
