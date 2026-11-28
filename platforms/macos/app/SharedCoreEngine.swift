@@ -57,11 +57,16 @@ public final class SharedCoreEngine {
         }
     }
 
+    /// Only accessories are read here: the Mac UI gets displays, sensors and Game Mode from its own
+    /// managers, and a full engine snapshot spawns helper processes and reads the SMC.
     private func pullSnapshot() async {
-        guard let box else { return }
-        let updated = await Task.detached(priority: .utility) {
-            box.engine.snapshot()
+        guard let box, snapshot != nil else { return }
+        let accessories = await Task.detached(priority: .utility) {
+            box.engine.accessoriesSnapshot()
         }.value
+        // Re-read after the await: a mutation may have published a newer snapshot meanwhile.
+        guard var updated = snapshot, accessories != updated.accessories else { return }
+        updated.accessories = accessories
         self.snapshot = updated
         reportBatteryAlerts(updated)
     }
@@ -108,31 +113,31 @@ public final class SharedCoreEngine {
     }
 
     public func setDisplayBrightness(displayId: String, level: Float) async {
-        await runThrowingMutation { engine in
+        await runThrowingMutation(key: "setDisplayBrightness.\(displayId)") { engine in
             try engine.setDisplayBrightness(displayId: displayId, level: level)
         }
     }
 
     public func stepAllBrightness(delta: Float) async {
-        await runThrowingMutation { engine in
+        await runThrowingMutation(key: nil) { engine in
             try engine.stepAllBrightness(delta: delta)
         }
     }
 
     public func setDisplayVolume(displayId: String, level: Float) async {
-        await runThrowingMutation { engine in
+        await runThrowingMutation(key: "setDisplayVolume.\(displayId)") { engine in
             try engine.setDisplayVolume(displayId: displayId, level: level)
         }
     }
 
     public func setDisplayMuted(displayId: String, muted: Bool) async {
-        await runThrowingMutation { engine in
+        await runThrowingMutation(key: "setDisplayMuted.\(displayId)") { engine in
             try engine.setDisplayMuted(displayId: displayId, muted: muted)
         }
     }
 
     public func setDisplayInput(displayId: String, inputCode: UInt8) async {
-        await runThrowingMutation { engine in
+        await runThrowingMutation(key: "setDisplayInput.\(displayId)") { engine in
             try engine.setDisplayInput(displayId: displayId, inputCode: inputCode)
         }
     }
@@ -144,7 +149,7 @@ public final class SharedCoreEngine {
     }
 
     public func toggleBuiltinDisplay() async {
-        await runThrowingMutation { engine in
+        await runThrowingMutation(key: nil) { engine in
             try engine.toggleBuiltinDisplay()
         }
     }
@@ -156,7 +161,7 @@ public final class SharedCoreEngine {
     }
 
     public func toggleCaffeine() async {
-        await runThrowingMutation { engine in
+        await runThrowingMutation(key: nil) { engine in
             try engine.toggleCaffeine()
         }
     }
@@ -168,7 +173,7 @@ public final class SharedCoreEngine {
     }
 
     public func toggleGameModeForced() async {
-        await runThrowingMutation { engine in
+        await runThrowingMutation(key: nil) { engine in
             try engine.toggleGameModeForced()
         }
     }
@@ -343,18 +348,44 @@ public final class SharedCoreEngine {
         }
     }
 
+    @ObservationIgnored private var pendingThrowing: [String: @Sendable (AeronEngine) throws -> CoreAppSnapshot] = [:]
+    @ObservationIgnored private var runningThrowing: Set<String> = []
+
+    /// Like `runMutation`, for engine calls that can fail. Pass `key: nil` for calls that must all run
+    /// (relative steps); otherwise only the newest pending value per key is sent.
     private func runThrowingMutation(
+        key: String? = #function,
         _ work: @escaping @Sendable (AeronEngine) throws -> CoreAppSnapshot
     ) async {
         await startIfNeeded()
         guard let box else { return }
-        let result = await Task.detached(priority: .userInitiated) { () -> Result<CoreAppSnapshot, Error> in
+        guard let key else {
+            apply(await Self.run(work, on: box))
+            return
+        }
+        pendingThrowing[key] = work
+        guard !runningThrowing.contains(key) else { return }
+        runningThrowing.insert(key)
+        defer { runningThrowing.remove(key) }
+        while let next = pendingThrowing.removeValue(forKey: key) {
+            apply(await Self.run(next, on: box))
+        }
+    }
+
+    private static func run(
+        _ work: @escaping @Sendable (AeronEngine) throws -> CoreAppSnapshot,
+        on box: EngineBox
+    ) async -> Result<CoreAppSnapshot, Error> {
+        await Task.detached(priority: .userInitiated) { () -> Result<CoreAppSnapshot, Error> in
             do {
                 return .success(try work(box.engine))
             } catch {
                 return .failure(error)
             }
         }.value
+    }
+
+    private func apply(_ result: Result<CoreAppSnapshot, Error>) {
         switch result {
         case .success(let updated):
             self.snapshot = updated

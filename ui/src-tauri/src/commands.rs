@@ -14,7 +14,7 @@ struct SettingsNavPayload {
     accessory: Option<String>,
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_snapshot(core: State<'_, AeronCore>) -> AppSnapshot {
     core.snapshot()
 }
@@ -28,7 +28,7 @@ pub async fn refresh_all(core: State<'_, AeronCore>) -> Result<AppSnapshot, Stri
         .map_err(|err| err.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_display_brightness(
     core: State<'_, AeronCore>,
     display_id: String,
@@ -37,7 +37,7 @@ pub fn set_display_brightness(
     core.set_display_brightness(&display_id, level)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_display_volume(
     core: State<'_, AeronCore>,
     display_id: String,
@@ -46,7 +46,7 @@ pub fn set_display_volume(
     core.set_display_volume(&display_id, level)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_display_muted(
     core: State<'_, AeronCore>,
     display_id: String,
@@ -55,7 +55,7 @@ pub fn set_display_muted(
     core.set_display_muted(&display_id, muted)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_display_input(
     core: State<'_, AeronCore>,
     display_id: String,
@@ -64,7 +64,7 @@ pub fn set_display_input(
     core.set_display_input(&display_id, input_code)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_caffeine(
     core: State<'_, AeronCore>,
     active: bool,
@@ -73,12 +73,12 @@ pub fn set_caffeine(
     core.set_caffeine(active, duration_seconds)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn toggle_caffeine(core: State<'_, AeronCore>) -> Result<AppSnapshot, String> {
     core.toggle_caffeine()
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_game_mode_policy(
     core: State<'_, AeronCore>,
     policy: GameModePolicy,
@@ -86,22 +86,22 @@ pub fn set_game_mode_policy(
     core.set_game_mode_policy(policy)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn toggle_game_mode_forced(core: State<'_, AeronCore>) -> Result<AppSnapshot, String> {
     core.toggle_game_mode_forced()
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn update_preferences(core: State<'_, AeronCore>, prefs: AppPreferences) -> AppSnapshot {
     core.update_preferences(prefs)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_mx_master_dpi(core: State<'_, AeronCore>, dpi: u16) -> AppSnapshot {
     core.set_mx_master_dpi(dpi)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_mx_master_smart_shift(
     core: State<'_, AeronCore>,
     wheel_mode: MxWheelMode,
@@ -111,17 +111,17 @@ pub fn set_mx_master_smart_shift(
     core.set_mx_master_smart_shift(wheel_mode, smart_shift_enabled, threshold)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_logitech_g_dpi(core: State<'_, AeronCore>, dpi: u16) -> AppSnapshot {
     core.set_logitech_g_dpi(dpi)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_logitech_g_report_rate(core: State<'_, AeronCore>, hz: u16) -> AppSnapshot {
     core.set_logitech_g_report_rate(hz)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_logitech_g_triggers(
     core: State<'_, AeronCore>,
     triggers: TriggerSettings,
@@ -129,7 +129,7 @@ pub fn set_logitech_g_triggers(
     core.set_logitech_g_triggers(triggers)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_mx_keyboard_backlight(
     core: State<'_, AeronCore>,
     enabled: bool,
@@ -149,12 +149,12 @@ pub fn set_mx_keyboard_backlight(
     )
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_mx_keyboard_fn_inversion(core: State<'_, AeronCore>, standard_fn: bool) -> AppSnapshot {
     core.set_mx_keyboard_fn_inversion(standard_fn)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_g_keyboard_lighting(
     core: State<'_, AeronCore>,
     brightness: u16,
@@ -163,7 +163,7 @@ pub fn set_g_keyboard_lighting(
     core.set_g_keyboard_lighting(brightness, lighting)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_keychron_settings(
     core: State<'_, AeronCore>,
     active_stage: u8,
@@ -183,7 +183,7 @@ pub fn set_keychron_settings(
     )
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_razer_dock_lighting(
     core: State<'_, AeronCore>,
     brightness: Option<u8>,

@@ -181,7 +181,8 @@ function AeronDeckyPanel() {
             }
           })
           .catch(() => {});
-      }, delayMs);
+      // Each Keychron change is a write plus a save to the mouse's flash: send far fewer while dragging.
+      }, key.startsWith("keychron") ? Math.max(delayMs, 400) : delayMs);
 
       throttleTimersRef.current.set(key, timer);
     },

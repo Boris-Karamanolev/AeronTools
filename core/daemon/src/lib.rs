@@ -188,6 +188,13 @@ pub async fn serve(core: AeronCore, port: u16) -> Result<(), std::io::Error> {
     axum::serve(listener, build_router(core)).await
 }
 
+/// Device I/O blocks (HID reads with timeouts, DDC). Keep it off the async workers.
+async fn blocking<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> T {
+    tokio::task::spawn_blocking(work)
+        .await
+        .expect("aeron-daemon blocking task panicked")
+}
+
 async fn get_state(State(core): State<AeronCore>) -> Json<AppSnapshot> {
     Json(core.snapshot())
 }
@@ -206,7 +213,8 @@ async fn set_brightness(
     Path(id): Path<String>,
     Json(body): Json<LevelPayload>,
 ) -> Result<Json<AppSnapshot>, (StatusCode, String)> {
-    core.set_display_brightness(&id, body.level)
+    blocking(move || core.set_display_brightness(&id, body.level))
+        .await
         .map(Json)
         .map_err(|e| (StatusCode::BAD_REQUEST, e))
 }
@@ -216,7 +224,8 @@ async fn set_volume(
     Path(id): Path<String>,
     Json(body): Json<LevelPayload>,
 ) -> Result<Json<AppSnapshot>, (StatusCode, String)> {
-    core.set_display_volume(&id, body.level)
+    blocking(move || core.set_display_volume(&id, body.level))
+        .await
         .map(Json)
         .map_err(|e| (StatusCode::BAD_REQUEST, e))
 }
@@ -226,7 +235,8 @@ async fn set_mute(
     Path(id): Path<String>,
     Json(body): Json<MutePayload>,
 ) -> Result<Json<AppSnapshot>, (StatusCode, String)> {
-    core.set_display_muted(&id, body.muted)
+    blocking(move || core.set_display_muted(&id, body.muted))
+        .await
         .map(Json)
         .map_err(|e| (StatusCode::BAD_REQUEST, e))
 }
@@ -236,7 +246,8 @@ async fn set_input(
     Path(id): Path<String>,
     Json(body): Json<InputPayload>,
 ) -> Result<Json<AppSnapshot>, (StatusCode, String)> {
-    core.set_display_input(&id, body.code)
+    blocking(move || core.set_display_input(&id, body.code))
+        .await
         .map(Json)
         .map_err(|e| (StatusCode::BAD_REQUEST, e))
 }
@@ -263,89 +274,89 @@ async fn update_preferences(
     State(core): State<AeronCore>,
     Json(prefs): Json<AppPreferences>,
 ) -> Json<AppSnapshot> {
-    Json(core.update_preferences(prefs))
+    Json(blocking(move || core.update_preferences(prefs)).await)
 }
 
 async fn set_mx_master_dpi(
     State(core): State<AeronCore>,
     Json(body): Json<DpiPayload>,
 ) -> Json<AppSnapshot> {
-    Json(core.set_mx_master_dpi(body.dpi))
+    Json(blocking(move || core.set_mx_master_dpi(body.dpi)).await)
 }
 
 async fn set_mx_master_smart_shift(
     State(core): State<AeronCore>,
     Json(body): Json<SmartShiftPayload>,
 ) -> Json<AppSnapshot> {
-    Json(core.set_mx_master_smart_shift(body.wheel_mode, body.smart_shift_enabled, body.threshold))
+    Json(blocking(move || core.set_mx_master_smart_shift(body.wheel_mode, body.smart_shift_enabled, body.threshold)).await)
 }
 
 async fn set_logitech_g_dpi(
     State(core): State<AeronCore>,
     Json(body): Json<DpiPayload>,
 ) -> Json<AppSnapshot> {
-    Json(core.set_logitech_g_dpi(body.dpi))
+    Json(blocking(move || core.set_logitech_g_dpi(body.dpi)).await)
 }
 
 async fn set_logitech_g_report_rate(
     State(core): State<AeronCore>,
     Json(body): Json<ReportRatePayload>,
 ) -> Json<AppSnapshot> {
-    Json(core.set_logitech_g_report_rate(body.hz))
+    Json(blocking(move || core.set_logitech_g_report_rate(body.hz)).await)
 }
 
 async fn set_logitech_g_triggers(
     State(core): State<AeronCore>,
     Json(body): Json<TriggerSettings>,
 ) -> Json<AppSnapshot> {
-    Json(core.set_logitech_g_triggers(body))
+    Json(blocking(move || core.set_logitech_g_triggers(body)).await)
 }
 
 async fn set_mx_keyboard_backlight(
     State(core): State<AeronCore>,
     Json(body): Json<MxKeyboardPayload>,
 ) -> Json<AppSnapshot> {
-    Json(core.set_mx_keyboard_backlight(
+    Json(blocking(move || core.set_mx_keyboard_backlight(
         body.enabled,
         body.auto_brightness,
         body.battery_saving,
         body.level,
         body.duration_seconds,
         body.effect,
-    ))
+    )).await)
 }
 
 async fn set_mx_keyboard_fn_inversion(
     State(core): State<AeronCore>,
     Json(body): Json<FnInversionPayload>,
 ) -> Json<AppSnapshot> {
-    Json(core.set_mx_keyboard_fn_inversion(body.standard_fn))
+    Json(blocking(move || core.set_mx_keyboard_fn_inversion(body.standard_fn)).await)
 }
 
 async fn set_g_keyboard_lighting(
     State(core): State<AeronCore>,
     Json(body): Json<GKeyboardPayload>,
 ) -> Json<AppSnapshot> {
-    Json(core.set_g_keyboard_lighting(body.brightness, body.lighting))
+    Json(blocking(move || core.set_g_keyboard_lighting(body.brightness, body.lighting)).await)
 }
 
 async fn set_keychron(
     State(core): State<AeronCore>,
     Json(body): Json<KeychronPayload>,
 ) -> Json<AppSnapshot> {
-    Json(core.set_keychron_settings(
+    Json(blocking(move || core.set_keychron_settings(
         body.active_stage,
         body.dpi,
         body.report_rate_hz,
         body.lift_off_mm,
         body.motion_sync,
         body.angle_snapping,
-    ))
+    )).await)
 }
 
 async fn set_razer_dock(
     State(core): State<AeronCore>,
     Json(body): Json<RazerDockPayload>,
 ) -> Json<AppSnapshot> {
-    Json(core.set_razer_dock_lighting(body.brightness, body.lighting))
+    Json(blocking(move || core.set_razer_dock_lighting(body.brightness, body.lighting)).await)
 }

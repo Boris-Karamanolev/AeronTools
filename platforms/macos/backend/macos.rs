@@ -784,6 +784,9 @@ pub struct MacosBackend {
     fns: PrivateDisplayFns,
     ddc_queue: DdcWriteQueue,
     av_services: Vec<AVServiceEntry>,
+    /// External displays online when `av_services` was discovered, and when.
+    av_services_for: Vec<CGDirectDisplayID>,
+    av_services_at: Option<std::time::Instant>,
     cached_displays: Vec<ExternalDisplayInfo>,
     builtin_display_id: Option<CGDirectDisplayID>,
     saved_panel_id: Option<CGDirectDisplayID>,
@@ -812,6 +815,8 @@ impl MacosBackend {
             fns,
             ddc_queue,
             av_services: Vec::new(),
+            av_services_for: Vec::new(),
+            av_services_at: None,
             cached_displays: Vec::new(),
             builtin_display_id: None,
             saved_panel_id: None,
@@ -1058,6 +1063,28 @@ impl MacosBackend {
         out
     }
 
+    fn rediscover_av_services(&mut self) {
+        self.av_services = self.discover_av_services();
+        self.av_services_for = self.external_display_ids();
+        self.av_services_at = Some(std::time::Instant::now());
+    }
+
+    /// The service for a write. Rediscovers when displays changed, or when the last discovery is a
+    /// few seconds old: a monitor that slept or replugged keeps its display ID but gets a new
+    /// service, and the write dedup must not drop a value the monitor's own buttons changed since.
+    /// A slider drag stays on one discovery.
+    fn av_service_for_write(&mut self, display_id: CGDirectDisplayID) -> Option<CFTypeRef> {
+        let changed = self.external_display_ids() != self.av_services_for;
+        let stale = self
+            .av_services_at
+            .is_none_or(|at| at.elapsed() > Duration::from_secs(3));
+        if changed || stale {
+            self.rediscover_av_services();
+            self.ddc_queue.clear_cache();
+        }
+        self.av_service_for(display_id)
+    }
+
     fn av_service_for(&self, display_id: CGDirectDisplayID) -> Option<CFTypeRef> {
         if self.av_services.is_empty() {
             return None;
@@ -1146,7 +1173,7 @@ impl PlatformBackend for MacosBackend {
             self.builtin_display_id = Some(builtin);
         }
 
-        self.av_services = self.discover_av_services();
+        self.rediscover_av_services();
         self.ddc_queue.clear_cache();
         let display_names = discover_macos_display_names();
         let external_ids = self.external_display_ids();
@@ -1314,7 +1341,7 @@ impl PlatformBackend for MacosBackend {
                         let _ = set_fn(cg_id, clamped);
                     }
                 }
-            } else if let Some(svc) = self.av_service_for(cg_id) {
+            } else if let Some(svc) = self.av_service_for_write(cg_id) {
                 let val = (clamped * 100.0).round() as u16;
                 self.ddc_queue.enqueue(cg_id, svc, ddc::vcp::BRIGHTNESS, val);
             }
@@ -1328,7 +1355,7 @@ impl PlatformBackend for MacosBackend {
     fn set_display_volume(&mut self, display_id: &str, level: f32) -> Result<(), String> {
         let clamped = level.clamp(0.0, 1.0);
         if let Some(cg_id) = parse_cg_id(display_id) {
-            if let Some(svc) = self.av_service_for(cg_id) {
+            if let Some(svc) = self.av_service_for_write(cg_id) {
                 let val = (clamped * 100.0).round() as u16;
                 self.ddc_queue
                     .enqueue(cg_id, svc, ddc::vcp::AUDIO_SPEAKER_VOLUME, val);
@@ -1342,7 +1369,7 @@ impl PlatformBackend for MacosBackend {
 
     fn set_display_muted(&mut self, display_id: &str, muted: bool) -> Result<(), String> {
         if let Some(cg_id) = parse_cg_id(display_id) {
-            if let Some(svc) = self.av_service_for(cg_id) {
+            if let Some(svc) = self.av_service_for_write(cg_id) {
                 self.ddc_queue
                     .enqueue(cg_id, svc, ddc::vcp::AUDIO_MUTE, if muted { 1 } else { 2 });
             }
@@ -1355,7 +1382,7 @@ impl PlatformBackend for MacosBackend {
 
     fn set_display_input(&mut self, display_id: &str, input_code: u8) -> Result<(), String> {
         if let Some(cg_id) = parse_cg_id(display_id) {
-            if let Some(svc) = self.av_service_for(cg_id) {
+            if let Some(svc) = self.av_service_for_write(cg_id) {
                 self.ddc_queue
                     .enqueue(cg_id, svc, ddc::vcp::INPUT_SOURCE, input_code as u16);
             }

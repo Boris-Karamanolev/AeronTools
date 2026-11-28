@@ -4,7 +4,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::thread::ThreadId;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use aeron_protocols::dock_topology::DockLayout;
 use aeron_protocols::hidpp::{self, DeviceKind, MxWheelMode, PairedDevice, ReceiverFamily};
@@ -39,18 +39,49 @@ pub struct HidManager {
     g_keyboard_effect_indices: HashMap<RgbEffect, u8>,
     keychron_path: Option<(String, bool)>,
     keychron_settings_block: Option<KeychronSettingsBlock>,
+    /// Open Keychron receiver / cable handles, kept open so the reports the receiver and mouse send
+    /// on their own (link changes, DPI button, charging) are buffered between scans.
+    keychron_links: HashMap<String, KeychronLink>,
+    /// Set for a scan the user or a wake asked for; such a scan re-reads every device.
+    forced_scan: bool,
     razer_dock_path: Option<String>,
     sessions: Vec<PathSession>,
     stored: accessory_store::Stored,
     mx_backlight: Option<BacklightConfig>,
     g_mouse_primed: bool,
     g_keyboard_primed: bool,
+    /// Receivers that were asked for link notifications (register 0x00).
+    receiver_notifications: HashSet<String>,
+    /// The G mouse was put in host mode (onboard profiles off) and must be handed back on quit.
+    /// Unlike `g_mouse_primed`, a sleeping mouse doesn't clear it: it may still be in host mode.
+    g_mouse_hosted: bool,
+    /// Settings the Keychron mouse didn't take (it was dozing), retried on the next scan.
+    keychron_pending_write: Option<(String, KeychronSettingsBlock)>,
 }
 
 impl Default for HidManager {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Routed requests reach the mouse through the receiver. Each one keeps the mouse awake, and an awake
+/// mouse reports pointer activity that stops the computer idling, so the mouse is read once per link
+/// and its battery only every `KEYCHRON_POWER_REFRESH`.
+const KEYCHRON_POWER_REFRESH: Duration = Duration::from_secs(10 * 60);
+/// After a linked mouse fails to answer (asleep), wait this long before asking again.
+const KEYCHRON_ASLEEP_RETRY: Duration = Duration::from_secs(30);
+/// The receiver and cable answer within milliseconds; an awake mouse through the receiver too.
+const KEYCHRON_TIMEOUT_MS: i32 = 1000;
+const KEYCHRON_ROUTED_TIMEOUT_MS: i32 = 300;
+
+struct KeychronLink {
+    dev: HidDevice,
+    routed: bool,
+    /// Settings and power were read during this link.
+    loaded: bool,
+    last_power: Option<Instant>,
+    retry_after: Option<Instant>,
 }
 
 #[derive(Default)]
@@ -78,12 +109,17 @@ impl HidManager {
             g_keyboard_effect_indices: HashMap::new(),
             keychron_path: None,
             keychron_settings_block: None,
+            keychron_links: HashMap::new(),
+            forced_scan: false,
             razer_dock_path: None,
             sessions: Vec::new(),
             stored,
             mx_backlight: None,
             g_mouse_primed: false,
             g_keyboard_primed: false,
+            receiver_notifications: HashSet::new(),
+            g_mouse_hosted: false,
+            keychron_pending_write: None,
         }
     }
 
@@ -173,7 +209,7 @@ impl HidManager {
         // macOS sessions hand the G mouse back on stop. Elsewhere there's no session, so leave host mode
         // here; otherwise the mouse ignores its onboard profile (and G HUB) until it's power-cycled.
         #[cfg(not(target_os = "macos"))]
-        if self.g_mouse_primed {
+        if self.g_mouse_hosted {
             if let Some((path, dev_idx)) = self.logitech_g_mouse_path.clone() {
                 if let Some(dev) = self.open_path(&path) {
                     if let Some(feature) =
@@ -224,7 +260,21 @@ impl HidManager {
     /// Re-enumerates HID devices and queries telemetry for any connected supported accessories.
     /// Paired wireless devices whose receiver is present stay `connected = true` even while asleep,
     /// preserving their last-read battery and feature state until they wake again or are unplugged.
-    pub fn refresh(&mut self) {
+    ///
+    /// `force` is set when the user or a wake asked for the scan. Periodic scans skip requests that
+    /// would wake a sleeping wireless mouse (and keep the Mac from idling).
+    /// `woke` marks the forced scan that follows a system wake.
+    pub fn refresh(&mut self, force: bool, woke: bool) {
+        self.forced_scan = force;
+        if woke {
+            // The devices may have power-cycled back to their onboard settings while asleep.
+            self.g_mouse_primed = false;
+            self.g_keyboard_primed = false;
+        }
+        if force {
+            // Reopen the Keychron handles: a replug or resume can reuse the same path.
+            self.keychron_links.clear();
+        }
         if !self.prepare_api() {
             return;
         }
@@ -324,6 +374,9 @@ impl HidManager {
             seen.keychron = true;
             self.state.keychron_m3_mini.connected = true;
             self.state.keychron_m3_mini.connection = Some(AccessoryConnection::BluetoothLe);
+            // The 4K protocol isn't carried over Bluetooth, so a battery level read earlier is stale.
+            self.state.keychron_m3_mini.battery_percent = None;
+            self.state.keychron_m3_mini.is_charging = false;
         }
 
         // Clear disconnected devices cleanly while keeping cached telemetry for still-connected sleeping devices.
@@ -345,6 +398,7 @@ impl HidManager {
             self.state.logitech_g_mouse.battery_percent = None;
             self.state.logitech_g_mouse.is_charging = false;
             self.g_mouse_primed = false;
+            self.g_mouse_hosted = false;
         }
         if !seen.logitech_g_keyboard {
             self.g_keyboard_primed = false;
@@ -360,7 +414,12 @@ impl HidManager {
             self.state.keychron_m3_mini.battery_percent = None;
             self.state.keychron_m3_mini.is_charging = false;
             self.keychron_settings_block = None;
+            self.keychron_pending_write = None;
         }
+        self.keychron_links
+            .retain(|path, _| seen_keychron_paths.contains(path));
+        self.receiver_notifications
+            .retain(|path| seen_logitech_paths.contains(path));
         self.state.razer_dock.connected =
             seen.razer_dock_hid || self.state.razer_dock.ports.is_present;
         #[cfg(target_os = "macos")]
@@ -372,6 +431,16 @@ impl HidManager {
             .iter()
             .find(|session| session.path == path)
             .map(|session| session.interest)
+    }
+
+    /// Updates a session's live state before its reader thread runs the write, so the snapshot taken
+    /// right after a setter shows the new value instead of the old one until the next poll.
+    fn update_live(&self, path: &str, f: impl FnOnce(&mut crate::input_session::DeviceRuntime)) {
+        if let Some(session) = self.sessions.iter().find(|session| session.path == path) {
+            if let Ok(mut live) = session.runtime.lock() {
+                f(&mut live);
+            }
+        }
     }
 
     fn enqueue(&self, path: &str, write: DeviceWrite) {
@@ -678,8 +747,10 @@ impl HidManager {
         let is_unifying = pid == hidpp::UNIFYING_RECEIVER_PRODUCT_ID;
         let is_lightspeed = hidpp::LIGHTSPEED_RECEIVER_PRODUCT_IDS.contains(&pid);
         let is_receiver = is_bolt || is_unifying || is_lightspeed;
-        if is_receiver {
-            // Register 0x00 bit 8: wireless connect/disconnect notifications (HID++ 1.0 0x41).
+        // Register 0x00 bit 8: wireless connect/disconnect notifications (HID++ 1.0 0x41). Only the
+        // macOS input sessions listen for them, and the setting sticks, so write it once per receiver.
+        #[cfg(target_os = "macos")]
+        if is_receiver && self.receiver_notifications.insert(path.to_string()) {
             let _ = dev.write(&[0x10, 0xFF, 0x80, 0x00, 0x00, 0x01, 0x00]);
         }
 
@@ -760,12 +831,15 @@ impl HidManager {
                             || lower.contains("keyboard")
                         {
                             seen.logitech_g_keyboard = true;
+                            // Asleep: it comes back on its onboard lighting, so prime it again then.
+                            self.g_keyboard_primed = false;
                             self.logitech_g_keyboard_path = Some((path.to_string(), dev_idx));
                             self.state.logitech_g_keyboard.connected = true;
                             self.state.logitech_g_keyboard.name = p.name.clone();
                             self.state.logitech_g_keyboard.connection = Some(connection);
                         } else if p.kind.is_pointing_device() {
                             seen.logitech_g_mouse = true;
+                            self.g_mouse_primed = false;
                             self.logitech_g_mouse_path = Some((path.to_string(), dev_idx));
                             self.state.logitech_g_mouse.connected = true;
                             self.state.logitech_g_mouse.name = p.name.clone();
@@ -1126,47 +1200,196 @@ impl HidManager {
         }
     }
 
-    fn keychron_request(&self, dev: &HidDevice, pkt: &[u8; 64]) -> Option<Vec<u8>> {
+    /// `Err` means the handle itself failed (device gone or re-enumerated); `Ok(None)` is no reply.
+    fn keychron_request(dev: &HidDevice, pkt: &[u8; 64]) -> Result<Option<Vec<u8>>, ()> {
         let mut with_id = [0u8; 65];
         with_id[0] = 0x00;
         with_id[1..].copy_from_slice(pkt);
-        dev.write(&with_id).ok()?;
+        dev.write(&with_id).map_err(|_| ())?;
+        let timeout = if pkt[0] & keychron::ROUTE_BIT != 0 {
+            KEYCHRON_ROUTED_TIMEOUT_MS
+        } else {
+            KEYCHRON_TIMEOUT_MS
+        };
         let mut buf = [0u8; 65];
         for _ in 0..8 {
-            let n = dev.read_timeout(&mut buf, 1000).ok()?;
+            let n = dev.read_timeout(&mut buf, timeout).map_err(|_| ())?;
             if n == 0 {
-                return None;
+                return Ok(None);
             }
-            let slice = if n == 65 && buf[0] == 0 {
-                &buf[1..65]
-            } else {
-                &buf[..n]
-            };
+            let slice = Self::keychron_report(&buf, n);
             if keychron::is_reply(slice, pkt) {
-                return Some(slice.to_vec());
+                return Ok(Some(slice.to_vec()));
             }
         }
-        None
+        Ok(None)
+    }
+
+    fn keychron_report(buf: &[u8; 65], n: usize) -> &[u8] {
+        if n == 65 && buf[0] == 0 {
+            &buf[1..65]
+        } else {
+            &buf[..n]
+        }
+    }
+
+    /// Sends one request on the open handle for `path`. A failed handle is dropped, so the next
+    /// scan opens the device again.
+    fn keychron_send(&mut self, path: &str, pkt: &[u8; 64]) -> Option<Vec<u8>> {
+        let link = self.keychron_links.get(path)?;
+        match Self::keychron_request(&link.dev, pkt) {
+            Ok(reply) => reply,
+            Err(()) => {
+                self.keychron_links.remove(path);
+                None
+            }
+        }
+    }
+
+    /// Handles the reports the receiver and mouse sent on their own since the last read:
+    /// the receiver's link changes, and the mouse's power reports (DPI button, charging).
+    fn drain_keychron_reports(&mut self, path: &str) {
+        let Some(link) = self.keychron_links.get(path) else {
+            return;
+        };
+        let routed = link.routed;
+        let mut reports = Vec::new();
+        let mut buf = [0u8; 65];
+        let mut failed = false;
+        for _ in 0..64 {
+            match link.dev.read_timeout(&mut buf, 0) {
+                Ok(n) if n > 0 => reports.push(Self::keychron_report(&buf, n).to_vec()),
+                Ok(_) => break,
+                Err(_) => {
+                    failed = true;
+                    break;
+                }
+            }
+        }
+        if failed {
+            self.keychron_links.remove(path);
+            return;
+        }
+        for report in reports {
+            if report.len() <= 4 || report[3] != keychron::Command::POWER.sub {
+                continue;
+            }
+            if report[0] & !keychron::ROUTE_BIT != keychron::Command::POWER.id {
+                continue;
+            }
+            let from_receiver = routed && report[0] & keychron::ROUTE_BIT == 0;
+            if from_receiver {
+                // The mouse joined the receiver (woke, or came back from cable or Bluetooth) or left it.
+                if let Some(link) = self.keychron_links.get_mut(path) {
+                    link.loaded = false;
+                    link.retry_after = None;
+                }
+            } else if let Some(power) = keychron::PowerReply::parse(&report) {
+                self.apply_keychron_power(path, power);
+            }
+        }
+    }
+
+    fn apply_keychron_power(&mut self, path: &str, power: keychron::PowerReply) {
+        let mouse = &mut self.state.keychron_m3_mini;
+        mouse.battery_percent = power.percent;
+        mouse.is_charging = power.is_charging;
+        mouse.active_stage = power.active_stage;
+        if let Some(max_hz) = power.max_report_rate_hz {
+            mouse.max_report_rate_hz = max_hz;
+        }
+        if let Some(block) = self.keychron_settings_block.as_mut() {
+            let count = block.stage_count();
+            block.set_active_stage(power.active_stage.min(count.saturating_sub(1) as u8));
+        }
+        if let Some(link) = self.keychron_links.get_mut(path) {
+            link.last_power = Some(Instant::now());
+        }
+    }
+
+    fn read_keychron_power(&mut self, path: &str, routed: bool) -> Option<keychron::PowerReply> {
+        let pkt = keychron::packet(keychron::Command::POWER, routed, &[]);
+        let reply = self.keychron_send(path, &pkt);
+        let power = reply.as_deref().and_then(keychron::PowerReply::parse);
+        match power {
+            Some(power) => self.apply_keychron_power(path, power),
+            None => {
+                if let Some(link) = self.keychron_links.get_mut(path) {
+                    link.retry_after = Some(Instant::now() + KEYCHRON_ASLEEP_RETRY);
+                }
+            }
+        }
+        power
     }
 
     fn probe_keychron(&mut self, path: &str, routed: bool, seen: &mut ScanSeen) {
-        let Some(dev) = self.open_path(path) else {
+        if !self.keychron_links.contains_key(path) {
+            let Some(dev) = self.open_path(path) else {
+                return;
+            };
+            self.keychron_links.insert(
+                path.to_string(),
+                KeychronLink {
+                    dev,
+                    routed,
+                    loaded: false,
+                    last_power: None,
+                    retry_after: None,
+                },
+            );
+        }
+        self.drain_keychron_reports(path);
+        if !self.keychron_links.contains_key(path) {
+            // The old handle failed (replug or resume); the next scan opens a fresh one.
             return;
-        };
+        }
 
         // On the 4K Link receiver, first ask the receiver itself whether a mouse is linked
         // (answers even while the mouse sleeps, matching KeychronM3MiniConnector.swift).
         if routed {
             let link_pkt = keychron::packet(keychron::Command::POWER, false, &[]);
-            let Some(link_rep) = self.keychron_request(&dev, &link_pkt) else {
+            let Some(link_rep) = self.keychron_send(path, &link_pkt) else {
                 return;
             };
             if link_rep.get(4).copied() != Some(keychron::LINKED_STATE) {
+                if let Some(link) = self.keychron_links.get_mut(path) {
+                    link.loaded = false;
+                    link.retry_after = None;
+                }
                 return;
             }
+        }
+
+        let forced = self.forced_scan;
+        let now = Instant::now();
+        let (loaded, last_power, retry_after) = match self.keychron_links.get(path) {
+            Some(link) => (link.loaded, link.last_power, link.retry_after),
+            None => return,
+        };
+
+        // Already read during this link: keep the cached state rather than waking the mouse.
+        if loaded && !forced {
+            self.mark_keychron_seen(path, routed, seen);
+            if !retry_after.is_some_and(|at| now < at) {
+                self.flush_keychron_pending(path, routed);
+            }
+            let power_due = last_power.is_none_or(|at| now.duration_since(at) >= KEYCHRON_POWER_REFRESH);
+            let asleep = retry_after.is_some_and(|at| now < at);
+            if power_due && !asleep {
+                self.read_keychron_power(path, routed);
+            }
+            return;
+        }
+        // Linked but asleep at the last try: don't ask again on every scan.
+        if !forced && retry_after.is_some_and(|at| now < at) {
+            self.mark_keychron_seen(path, routed, seen);
+            return;
+        }
+
+        if routed {
             // If awake, verify it is actually an M3 Mini 4K (model ID 0x0622).
             let ver_pkt = keychron::packet(keychron::Command::VERSION, true, &[]);
-            if let Some(ver_rep) = self.keychron_request(&dev, &ver_pkt) {
+            if let Some(ver_rep) = self.keychron_send(path, &ver_pkt) {
                 if ver_rep.len() > 5 {
                     let model = u16::from_le_bytes([ver_rep[4], ver_rep[5]]);
                     if model != 0 && model != keychron::M3_MINI_MODEL_ID {
@@ -1176,6 +1399,76 @@ impl HidManager {
             }
         }
 
+        self.mark_keychron_seen(path, routed, seen);
+
+        // Nothing answering means the mouse is linked on the receiver, just asleep right now.
+        let Some(power) = self.read_keychron_power(path, routed) else {
+            return;
+        };
+
+        // A change the mouse missed while dozing: send it now rather than reading the old values back.
+        if self.flush_keychron_pending(path, routed) {
+            if let Some(link) = self.keychron_links.get_mut(path) {
+                link.loaded = true;
+                link.retry_after = None;
+            }
+            #[cfg(target_os = "macos")]
+            self.read_keychron_buttons(path, routed);
+            return;
+        }
+
+        let settings_pkt = keychron::packet(keychron::Command::READ_SETTINGS, routed, &[]);
+        let Some(rep) = self.keychron_send(path, &settings_pkt) else {
+            return;
+        };
+        let Some(mut block) = KeychronSettingsBlock::parse(&rep) else {
+            return;
+        };
+        let count = block.stage_count();
+        self.state.keychron_m3_mini.stage_dpis = (0..count).map(|i| block.dpi(i)).collect();
+        let stage = power.active_stage.min(count.saturating_sub(1) as u8);
+        block.set_active_stage(stage);
+        self.state.keychron_m3_mini.active_stage = stage;
+        if let Some(hz) = block.report_rate_hz() {
+            self.state.keychron_m3_mini.report_rate_hz = hz;
+        }
+        self.state.keychron_m3_mini.lift_off_mm = block.lift_off_mm();
+        self.state.keychron_m3_mini.motion_sync = block.motion_sync();
+        self.state.keychron_m3_mini.angle_snapping = block.angle_snapping();
+        self.keychron_settings_block = Some(block);
+        if let Some(link) = self.keychron_links.get_mut(path) {
+            link.loaded = true;
+            link.retry_after = None;
+        }
+        #[cfg(target_os = "macos")]
+        self.read_keychron_buttons(path, routed);
+    }
+
+    /// Writes and saves a settings block. True if the mouse took it.
+    fn write_keychron_settings(&mut self, path: &str, routed: bool, block: &KeychronSettingsBlock) -> bool {
+        let write_pkt = keychron::packet(keychron::Command::WRITE_SETTINGS, routed, &block.raw);
+        if self.keychron_send(path, &write_pkt).is_none() {
+            return false;
+        }
+        let save_pkt = keychron::packet(keychron::Command::SAVE, routed, &[]);
+        let _ = self.keychron_send(path, &save_pkt);
+        true
+    }
+
+    /// Retries a write the mouse missed. True if one was pending for `path` and it went through.
+    fn flush_keychron_pending(&mut self, path: &str, routed: bool) -> bool {
+        let Some((pending_path, block)) = self.keychron_pending_write.clone() else {
+            return false;
+        };
+        if pending_path != path || !self.write_keychron_settings(path, routed, &block) {
+            return false;
+        }
+        self.keychron_settings_block = Some(block);
+        self.keychron_pending_write = None;
+        true
+    }
+
+    fn mark_keychron_seen(&mut self, path: &str, routed: bool, seen: &mut ScanSeen) {
         seen.keychron = true;
         self.keychron_path = Some((path.to_string(), routed));
         self.state.keychron_m3_mini.connected = true;
@@ -1184,64 +1477,46 @@ impl HidManager {
         } else {
             AccessoryConnection::UsbWired
         });
-
-        let power_pkt = keychron::packet(keychron::Command::POWER, routed, &[]);
-        let Some(power_rep) = self.keychron_request(&dev, &power_pkt) else {
-            // Mouse is linked on the receiver, just asleep right now.
-            return;
-        };
-        let Some(power) = keychron::PowerReply::parse(&power_rep) else {
-            return;
-        };
-
-        self.state.keychron_m3_mini.battery_percent = power.percent;
-        self.state.keychron_m3_mini.is_charging = power.is_charging;
-        self.state.keychron_m3_mini.active_stage = power.active_stage;
-        if let Some(max_hz) = power.max_report_rate_hz {
-            self.state.keychron_m3_mini.max_report_rate_hz = max_hz;
-        }
-
-        let settings_pkt = keychron::packet(keychron::Command::READ_SETTINGS, routed, &[]);
-        if let Some(rep) = self.keychron_request(&dev, &settings_pkt) {
-            if let Some(mut block) = KeychronSettingsBlock::parse(&rep) {
-                let count = block.stage_count();
-                self.state.keychron_m3_mini.stage_dpis =
-                    (0..count).map(|i| block.dpi(i)).collect();
-                let stage = power.active_stage.min(count.saturating_sub(1) as u8);
-                block.set_active_stage(stage);
-                self.state.keychron_m3_mini.active_stage = stage;
-                if let Some(hz) = block.report_rate_hz() {
-                    self.state.keychron_m3_mini.report_rate_hz = hz;
-                }
-                self.state.keychron_m3_mini.lift_off_mm = block.lift_off_mm();
-                self.state.keychron_m3_mini.motion_sync = block.motion_sync();
-                self.state.keychron_m3_mini.angle_snapping = block.angle_snapping();
-                self.keychron_settings_block = Some(block);
-            }
-        }
-        self.read_keychron_buttons(&dev, routed);
     }
 
-    fn read_keychron_buttons(&mut self, dev: &HidDevice, routed: bool) {
+    /// The side buttons are only remapped on macOS; elsewhere they work as buttons 4 and 5.
+    #[cfg(target_os = "macos")]
+    fn read_keychron_buttons(&mut self, path: &str, routed: bool) {
         let packet = keychron::packet(keychron::Command::READ_BUTTONS, routed, &[]);
-        let Some(reply) = self.keychron_request(dev, &packet) else {
+        let Some(reply) = self.keychron_send(path, &packet) else {
             return;
         };
-        #[cfg(target_os = "macos")]
-        {
-            if let Some(entry) = keychron::button_entry(&reply, keychron::BUTTON_BACK) {
-                if let Some(action) = crate::input_perform::action_for_keychron(entry, true) {
-                    self.state.keychron_m3_mini.back_button_action = action;
-                }
-            }
-            if let Some(entry) = keychron::button_entry(&reply, keychron::BUTTON_FORWARD) {
-                if let Some(action) = crate::input_perform::action_for_keychron(entry, false) {
-                    self.state.keychron_m3_mini.forward_button_action = action;
-                }
+        if let Some(entry) = keychron::button_entry(&reply, keychron::BUTTON_BACK) {
+            if let Some(action) = crate::input_perform::action_for_keychron(entry, true) {
+                self.state.keychron_m3_mini.back_button_action = action;
             }
         }
-        #[cfg(not(target_os = "macos"))]
-        let _ = reply;
+        if let Some(entry) = keychron::button_entry(&reply, keychron::BUTTON_FORWARD) {
+            if let Some(action) = crate::input_perform::action_for_keychron(entry, false) {
+                self.state.keychron_m3_mini.forward_button_action = action;
+            }
+        }
+    }
+
+    /// Handle for writes from the UI: the scan's open one, or a fresh one if the scan hasn't run yet.
+    fn ensure_keychron_link(&mut self, path: &str, routed: bool) -> bool {
+        if self.keychron_links.contains_key(path) {
+            return true;
+        }
+        let Some(dev) = self.open_path(path) else {
+            return false;
+        };
+        self.keychron_links.insert(
+            path.to_string(),
+            KeychronLink {
+                dev,
+                routed,
+                loaded: false,
+                last_power: None,
+                retry_after: None,
+            },
+        );
+        true
     }
 
     fn razer_request(&self, dev: &HidDevice, pkt: &[u8; 90]) -> Option<Vec<u8>> {
@@ -1428,6 +1703,11 @@ impl HidManager {
         let lod = self.state.logitech_g_mouse.lift_off_distance;
         if let Some((ref path, dev_idx)) = self.logitech_g_mouse_path.clone() {
             if self.session_interest(path).is_some() {
+                self.update_live(path, |live| {
+                    if let Some(mouse) = live.g_mouse.as_mut() {
+                        mouse.dpi = clamped;
+                    }
+                });
                 self.enqueue(path, DeviceWrite::GDpi { dpi: clamped, lod });
                 accessory_store::save(&self.state, &self.stored);
                 return;
@@ -1460,6 +1740,11 @@ impl HidManager {
         accessory_store::save(&self.state, &self.stored);
         if let Some((ref path, dev_idx)) = self.logitech_g_mouse_path.clone() {
             if self.session_interest(path).is_some() {
+                self.update_live(path, |live| {
+                    if let Some(mouse) = live.g_mouse.as_mut() {
+                        mouse.report_rate_hz = hz;
+                    }
+                });
                 self.enqueue(path, DeviceWrite::GReportRate(hz));
                 return;
             }
@@ -1486,6 +1771,11 @@ impl HidManager {
         accessory_store::save(&self.state, &self.stored);
         if let Some((ref path, dev_idx)) = self.logitech_g_mouse_path.clone() {
             if self.session_interest(path).is_some() {
+                self.update_live(path, |live| {
+                    if let Some(mouse) = live.g_mouse.as_mut() {
+                        mouse.triggers = triggers;
+                    }
+                });
                 self.enqueue(path, DeviceWrite::GTriggers(triggers));
                 return;
             }
@@ -1551,6 +1841,22 @@ impl HidManager {
         self.state.mx_keyboard.backlight_effect = effect;
         if let Some((ref path, dev_idx)) = self.mx_keyboard_path.clone() {
             if self.session_interest(path).is_some() {
+                let (level, duration) = (
+                    self.state.mx_keyboard.backlight_level,
+                    self.state.mx_keyboard.duration_seconds,
+                );
+                self.update_live(path, |live| {
+                    if let Some(keyboard) = live.keyboard.as_mut() {
+                        if let Some(cfg) = keyboard.backlight.as_mut() {
+                            cfg.is_enabled = enabled;
+                            cfg.level = level;
+                            cfg.set_duration_seconds(duration);
+                            cfg.set_automatic_brightness(auto_brightness);
+                            cfg.set_battery_saving(battery_saving);
+                        }
+                        keyboard.backlight_effect = Some(effect);
+                    }
+                });
                 self.enqueue(
                     path,
                     DeviceWrite::KeyboardBacklight {
@@ -1617,6 +1923,11 @@ impl HidManager {
         if let Some((ref path, dev_idx)) = self.mx_keyboard_path.clone() {
             if self.session_interest(path).is_some() {
                 let host = self.state.mx_keyboard.current_host.unwrap_or(0);
+                self.update_live(path, |live| {
+                    if let Some(keyboard) = live.keyboard.as_mut() {
+                        keyboard.fn_standard = Some(standard_fn);
+                    }
+                });
                 self.enqueue(path, DeviceWrite::KeyboardFn { standard: standard_fn, host });
                 accessory_store::save(&self.state, &self.stored);
                 return;
@@ -1663,7 +1974,11 @@ impl HidManager {
     }
 
     pub fn set_g_keyboard_lighting(&mut self, brightness: u16, lighting: RgbLighting) {
-        let lighting_changed = self.state.logitech_g_keyboard.lighting != lighting;
+        // Re-send the effect when it changed, or when it was picked again (brightness unchanged):
+        // that's how the user takes lighting back after the keyboard fell back to onboard. Not on
+        // brightness drags, which would restart animated effects every tick.
+        let resend_effect = self.state.logitech_g_keyboard.lighting != lighting
+            || self.state.logitech_g_keyboard.brightness == brightness;
         self.state.logitech_g_keyboard.brightness = brightness;
         self.state.logitech_g_keyboard.lighting = lighting;
         self.stored.g_lighting = true;
@@ -1685,7 +2000,7 @@ impl HidManager {
                     );
                     let _ = self.hidpp_request(&dev, &pkt);
                 }
-                if lighting_changed {
+                if resend_effect {
                     if let Some(rgb_idx) =
                         self.resolve_feature(&dev, dev_idx, logitech_keyboard::FEATURE_RGB_EFFECTS)
                     {
@@ -1732,6 +2047,50 @@ impl HidManager {
         {
             return;
         }
+        let link = self
+            .keychron_path
+            .clone()
+            .filter(|(path, routed)| self.ensure_keychron_link(path, *routed));
+
+        // The UI sends back the stage it last showed. If that isn't a stage change, use the mouse's
+        // current stage instead, so a change made with the DPI button isn't undone.
+        let shown_stage = self.state.keychron_m3_mini.active_stage;
+        if let Some((path, routed)) = &link {
+            self.drain_keychron_reports(path);
+            let stale = self
+                .keychron_links
+                .get(path.as_str())
+                .and_then(|l| l.last_power)
+                .is_none_or(|at| at.elapsed() > Duration::from_secs(5));
+            if active_stage == shown_stage && stale {
+                self.read_keychron_power(path, *routed);
+            }
+        }
+        let shown_dpi = self
+            .state
+            .keychron_m3_mini
+            .stage_dpis
+            .get(shown_stage as usize)
+            .copied();
+        let (active_stage, dpi) = if active_stage == shown_stage {
+            let actual = self.state.keychron_m3_mini.active_stage;
+            // The DPI sent is the shown stage's. If the user didn't change it, keep the actual
+            // stage's own DPI rather than copying the shown one into it.
+            let dpi = if actual != shown_stage && Some(dpi) == shown_dpi {
+                self.state
+                    .keychron_m3_mini
+                    .stage_dpis
+                    .get(actual as usize)
+                    .copied()
+                    .unwrap_or(dpi)
+            } else {
+                dpi
+            };
+            (actual, dpi)
+        } else {
+            (active_stage, dpi)
+        };
+
         let clamped_dpi = keychron::clamp_dpi(dpi);
         self.state.keychron_m3_mini.active_stage = active_stage;
         if let Some(slot) = self
@@ -1747,32 +2106,25 @@ impl HidManager {
         self.state.keychron_m3_mini.motion_sync = motion_sync;
         self.state.keychron_m3_mini.angle_snapping = angle_snapping;
 
-        if let (Some((path, routed)), Some(mut block)) = (
-            self.keychron_path.clone(),
-            self.keychron_settings_block.clone(),
-        ) {
-            block.set_active_stage(active_stage);
-            block.set_dpi(active_stage as usize, clamped_dpi);
-            block.set_report_rate_hz(report_rate_hz);
-            block.set_lift_off_mm(lift_off_mm);
-            block.set_motion_sync(motion_sync);
-            block.set_angle_snapping(angle_snapping);
-            self.keychron_settings_block = Some(block.clone());
+        let (Some((path, routed)), Some(mut block)) = (link, self.keychron_settings_block.clone())
+        else {
+            return;
+        };
+        block.set_active_stage(active_stage);
+        block.set_dpi(active_stage as usize, clamped_dpi);
+        block.set_report_rate_hz(report_rate_hz);
+        block.set_lift_off_mm(lift_off_mm);
+        block.set_motion_sync(motion_sync);
+        block.set_angle_snapping(angle_snapping);
+        self.keychron_settings_block = Some(block.clone());
 
-            if let Some(dev) = self.open_path(&path) {
-                let write_pkt =
-                    keychron::packet(keychron::Command::WRITE_SETTINGS, routed, &block.raw);
-                let mut written = self.keychron_request(&dev, &write_pkt);
-                if written.is_none() {
-                    std::thread::sleep(Duration::from_millis(500));
-                    written = self.keychron_request(&dev, &write_pkt);
-                }
-                if written.is_some() {
-                    let save_pkt = keychron::packet(keychron::Command::SAVE, routed, &[]);
-                    let _ = self.keychron_request(&dev, &save_pkt);
-                }
-            }
+        let mut written = self.write_keychron_settings(&path, routed, &block);
+        if !written {
+            std::thread::sleep(Duration::from_millis(500));
+            written = self.write_keychron_settings(&path, routed, &block);
         }
+        // A dozing mouse missed it: keep it and send it again once the mouse answers.
+        self.keychron_pending_write = (!written).then_some((path, block));
     }
 
     pub fn set_keychron_side_buttons(
@@ -1789,20 +2141,22 @@ impl HidManager {
         self.state.keychron_m3_mini.forward_button_action = forward_button;
         #[cfg(target_os = "macos")]
         if let Some((path, routed)) = self.keychron_path.clone() {
-            if let Some(dev) = self.open_path(&path) {
+            if self.ensure_keychron_link(&path, routed) {
                 for (back, action) in [(true, back_button), (false, forward_button)] {
-                    let Some(assignment) = crate::input_perform::keychron_assignment(action, back) else {
+                    let Some(assignment) = crate::input_perform::keychron_assignment(action, back)
+                    else {
                         continue;
                     };
                     let slot: u8 = if back { 3 } else { 4 };
                     let mut payload = vec![slot];
                     payload.extend_from_slice(&assignment);
-                    let packet = keychron::packet(keychron::Command::WRITE_BUTTON, routed, &payload);
-                    let _ = self.keychron_request(&dev, &packet);
+                    let packet =
+                        keychron::packet(keychron::Command::WRITE_BUTTON, routed, &payload);
+                    let _ = self.keychron_send(&path, &packet);
                 }
                 let save = keychron::packet(keychron::Command::SAVE, routed, &[]);
-                let _ = self.keychron_request(&dev, &save);
-                self.read_keychron_buttons(&dev, routed);
+                let _ = self.keychron_send(&path, &save);
+                self.read_keychron_buttons(&path, routed);
             }
         }
         accessory_store::save(&self.state, &self.stored);
@@ -1844,6 +2198,7 @@ impl HidManager {
         if let Some(feature) = self.resolve_feature(dev, dev_idx, logitech_g::FEATURE_ONBOARD_PROFILES) {
             let packet = hidpp::make_long_packet(dev_idx, feature, 1, hidpp::SOFTWARE_ID, &[0x02]);
             let _ = self.hidpp_request(dev, &packet);
+            self.g_mouse_hosted = true;
         }
         let triggers = self
             .state
