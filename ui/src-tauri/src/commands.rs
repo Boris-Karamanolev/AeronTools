@@ -2,9 +2,7 @@ use aeron_platform::AeronCore;
 use aeron_protocols::hidpp::MxWheelMode;
 use aeron_protocols::logitech_g::TriggerSettings;
 use aeron_protocols::logitech_keyboard::{BacklightEffect, RgbLighting};
-use aeron_protocols::models::{
-    AccessoryButtonAction, AppPreferences, AppSnapshot, GameModePolicy, MxMasterOptions,
-};
+use aeron_protocols::models::{AppPreferences, AppSnapshot, GameModePolicy};
 use aeron_protocols::razer_chroma::RazerLighting;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, LogicalSize, Manager, Size, State};
@@ -67,19 +65,6 @@ pub fn set_display_input(
 }
 
 #[tauri::command]
-pub fn set_builtin_display_enabled(
-    core: State<'_, AeronCore>,
-    enabled: bool,
-) -> Result<AppSnapshot, String> {
-    core.set_builtin_display_enabled(enabled)
-}
-
-#[tauri::command]
-pub fn toggle_builtin_display(core: State<'_, AeronCore>) -> Result<AppSnapshot, String> {
-    core.toggle_builtin_display()
-}
-
-#[tauri::command]
 pub fn set_caffeine(
     core: State<'_, AeronCore>,
     active: bool,
@@ -127,11 +112,6 @@ pub fn set_mx_master_smart_shift(
 }
 
 #[tauri::command]
-pub fn set_mx_master_options(core: State<'_, AeronCore>, options: MxMasterOptions) -> AppSnapshot {
-    core.set_mx_master_options(options)
-}
-
-#[tauri::command]
 pub fn set_logitech_g_dpi(core: State<'_, AeronCore>, dpi: u16) -> AppSnapshot {
     core.set_logitech_g_dpi(dpi)
 }
@@ -147,16 +127,6 @@ pub fn set_logitech_g_triggers(
     triggers: TriggerSettings,
 ) -> AppSnapshot {
     core.set_logitech_g_triggers(triggers)
-}
-
-#[tauri::command]
-pub fn set_logitech_g_options(
-    core: State<'_, AeronCore>,
-    back_button: AccessoryButtonAction,
-    forward_button: AccessoryButtonAction,
-    saves_to_onboard_profile: bool,
-) -> AppSnapshot {
-    core.set_logitech_g_options(back_button, forward_button, saves_to_onboard_profile)
 }
 
 #[tauri::command]
@@ -182,15 +152,6 @@ pub fn set_mx_keyboard_backlight(
 #[tauri::command]
 pub fn set_mx_keyboard_fn_inversion(core: State<'_, AeronCore>, standard_fn: bool) -> AppSnapshot {
     core.set_mx_keyboard_fn_inversion(standard_fn)
-}
-
-#[tauri::command]
-pub fn set_mx_keyboard_key_action(
-    core: State<'_, AeronCore>,
-    position: u8,
-    action: AccessoryButtonAction,
-) -> AppSnapshot {
-    core.set_mx_keyboard_key_action(position, action)
 }
 
 #[tauri::command]
@@ -220,15 +181,6 @@ pub fn set_keychron_settings(
         motion_sync,
         angle_snapping,
     )
-}
-
-#[tauri::command]
-pub fn set_keychron_side_buttons(
-    core: State<'_, AeronCore>,
-    back_button: AccessoryButtonAction,
-    forward_button: AccessoryButtonAction,
-) -> AppSnapshot {
-    core.set_keychron_side_buttons(back_button, forward_button)
 }
 
 #[tauri::command]

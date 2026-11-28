@@ -458,11 +458,6 @@ impl Default for AppPreferences {
                     label: "Toggle Game Mode".into(),
                     accelerator: Some("Ctrl+Alt+G".into()),
                 },
-                HotkeyBinding {
-                    action: "toggleBuiltinScreen".into(),
-                    label: "Toggle Built-in Screen".into(),
-                    accelerator: Some("Ctrl+Alt+B".into()),
-                },
             ],
             monitor_settings: HashMap::new(),
         }

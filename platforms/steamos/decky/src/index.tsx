@@ -216,7 +216,7 @@ function AeronDeckyPanel() {
     );
   }
 
-  const { accessories: acc, thermals, wattage, gameMode, caffeine, builtinDisplay } = state;
+  const { accessories: acc, thermals, wattage, gameMode, caffeine } = state;
 
   const anyAccessoryConnected =
     acc.mxMaster.connected ||
@@ -358,20 +358,6 @@ function AeronDeckyPanel() {
           ))
         )}
 
-        {builtinDisplay.present && builtinDisplay.canTurnOff && (
-          <PanelSectionRow>
-            <ToggleField
-              label="Built-in Display"
-              checked={!builtinDisplay.isTurnedOff}
-              onChange={(enabled) =>
-                sendImmediate("/api/displays/builtin", { enabled }, (prev) => ({
-                  ...prev,
-                  builtinDisplay: { ...prev.builtinDisplay, isTurnedOff: !enabled },
-                }))
-              }
-            />
-          </PanelSectionRow>
-        )}
       </PanelSection>
 
       {/* ---------- SYSTEM ---------- */}

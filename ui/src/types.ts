@@ -285,12 +285,6 @@ export interface HotkeyBinding {
   accelerator: string | null;
 }
 
-export interface BuiltinDisplayState {
-  present: boolean;
-  isTurnedOff: boolean;
-  canTurnOff: boolean;
-}
-
 export interface AppPreferences {
   showAccessoriesCard: boolean;
   showWattageMeter: boolean;
@@ -315,7 +309,6 @@ export interface AppSnapshot {
   platform: string;
   isSteamos: boolean;
   displays: ExternalDisplayInfo[];
-  builtinDisplay: BuiltinDisplayState;
   accessories: AccessoriesSnapshot;
   wattage: WattageSnapshot;
   thermals: ThermalSnapshot;

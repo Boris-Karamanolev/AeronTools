@@ -218,12 +218,10 @@ export default function App() {
         onDisplayVolume={handleDisplayVolume}
         onDisplayMute={(id, muted) => void aeronApi.setDisplayMuted(id, muted).then(setSnapshot)}
         onDisplayInput={(id, code) => void aeronApi.setDisplayInput(id, code).then(setSnapshot)}
-        onToggleBuiltinDisplay={() => void aeronApi.toggleBuiltinDisplay().then(setSnapshot)}
         onMxMasterDpi={(dpi) => void aeronApi.setMxMasterDpi(dpi).then(setSnapshot)}
         onMxMasterSmartShift={(mode, enabled, threshold) =>
           void aeronApi.setMxMasterSmartShift(mode, enabled, threshold).then(setSnapshot)
         }
-        onMxMasterOptions={(opts) => void aeronApi.setMxMasterOptions(opts).then(setSnapshot)}
         onLogitechGDpi={(dpi) => void aeronApi.setLogitechGDpi(dpi).then(setSnapshot)}
         onLogitechGReportRate={(hz) =>
           void aeronApi.setLogitechGReportRate(hz).then(setSnapshot)
@@ -231,25 +229,16 @@ export default function App() {
         onLogitechGTriggers={(triggers) =>
           void aeronApi.setLogitechGTriggers(triggers).then(setSnapshot)
         }
-        onLogitechGOptions={(back, forward, save) =>
-          void aeronApi.setLogitechGOptions(back, forward, save).then(setSnapshot)
-        }
         onMxKeyboardBacklight={(params) =>
           void aeronApi.setMxKeyboardBacklight(params).then(setSnapshot)
         }
         onMxKeyboardFnInversion={(standardFn) =>
           void aeronApi.setMxKeyboardFnInversion(standardFn).then(setSnapshot)
         }
-        onMxKeyboardKeyAction={(pos, action) =>
-          void aeronApi.setMxKeyboardKeyAction(pos, action).then(setSnapshot)
-        }
         onGKeyboardLighting={(brightness, lighting) =>
           void aeronApi.setGKeyboardLighting(brightness, lighting).then(setSnapshot)
         }
         onKeychronUpdate={(params) => void aeronApi.setKeychronSettings(params).then(setSnapshot)}
-        onKeychronSideButtons={(back, forward) =>
-          void aeronApi.setKeychronSideButtons(back, forward).then(setSnapshot)
-        }
         onRazerDockLighting={(brightness, lighting) =>
           void aeronApi.setRazerDockLighting(brightness, lighting).then(setSnapshot)
         }

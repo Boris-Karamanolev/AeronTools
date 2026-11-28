@@ -1,11 +1,9 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
-  AccessoryButtonAction,
   AppPreferences,
   AppSnapshot,
   BacklightEffect,
   GameModePolicy,
-  MxMasterOptions,
   MxWheelMode,
   RazerLighting,
   RgbLighting,
@@ -69,18 +67,6 @@ export const aeronApi = {
         });
   },
 
-  setBuiltinDisplayEnabled(enabled: boolean): Promise<AppSnapshot> {
-    return isTauriRuntime()
-      ? invoke("set_builtin_display_enabled", { enabled })
-      : httpJson("/api/displays/builtin", "POST", { enabled });
-  },
-
-  toggleBuiltinDisplay(): Promise<AppSnapshot> {
-    return isTauriRuntime()
-      ? invoke("toggle_builtin_display")
-      : httpJson("/api/displays/builtin/toggle", "POST");
-  },
-
   setCaffeine(active: boolean, durationSeconds: number | null): Promise<AppSnapshot> {
     return isTauriRuntime()
       ? invoke("set_caffeine", { active, durationSeconds })
@@ -131,12 +117,6 @@ export const aeronApi = {
         });
   },
 
-  setMxMasterOptions(options: MxMasterOptions): Promise<AppSnapshot> {
-    return isTauriRuntime()
-      ? invoke("set_mx_master_options", { options })
-      : httpJson("/api/accessories/mx-master/options", "POST", options);
-  },
-
   setLogitechGDpi(dpi: number): Promise<AppSnapshot> {
     return isTauriRuntime()
       ? invoke("set_logitech_g_dpi", { dpi })
@@ -153,20 +133,6 @@ export const aeronApi = {
     return isTauriRuntime()
       ? invoke("set_logitech_g_triggers", { triggers })
       : httpJson("/api/accessories/logitech-g/triggers", "POST", triggers);
-  },
-
-  setLogitechGOptions(
-    backButton: AccessoryButtonAction,
-    forwardButton: AccessoryButtonAction,
-    savesToOnboardProfile: boolean
-  ): Promise<AppSnapshot> {
-    return isTauriRuntime()
-      ? invoke("set_logitech_g_options", { backButton, forwardButton, savesToOnboardProfile })
-      : httpJson("/api/accessories/logitech-g/options", "POST", {
-          backButton,
-          forwardButton,
-          savesToOnboardProfile,
-        });
   },
 
   setMxKeyboardBacklight(params: {
@@ -188,12 +154,6 @@ export const aeronApi = {
       : httpJson("/api/accessories/mx-keyboard/fn-inversion", "POST", { standardFn });
   },
 
-  setMxKeyboardKeyAction(position: number, action: AccessoryButtonAction): Promise<AppSnapshot> {
-    return isTauriRuntime()
-      ? invoke("set_mx_keyboard_key_action", { position, action })
-      : httpJson("/api/accessories/mx-keyboard/key-action", "POST", { position, action });
-  },
-
   setGKeyboardLighting(brightness: number, lighting: RgbLighting): Promise<AppSnapshot> {
     return isTauriRuntime()
       ? invoke("set_g_keyboard_lighting", { brightness, lighting })
@@ -211,15 +171,6 @@ export const aeronApi = {
     return isTauriRuntime()
       ? invoke("set_keychron_settings", params)
       : httpJson("/api/accessories/keychron", "POST", params);
-  },
-
-  setKeychronSideButtons(
-    backButton: AccessoryButtonAction,
-    forwardButton: AccessoryButtonAction
-  ): Promise<AppSnapshot> {
-    return isTauriRuntime()
-      ? invoke("set_keychron_side_buttons", { backButton, forwardButton })
-      : httpJson("/api/accessories/keychron/buttons", "POST", { backButton, forwardButton });
   },
 
   setRazerDockLighting(

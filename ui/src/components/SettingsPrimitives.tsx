@@ -1,51 +1,7 @@
-import { useEffect, useRef, useState } from "react";
-import {
-  Camera,
-  Check,
-  ChevronsUpDown,
-  Mic,
-  MicOff,
-  Minus,
-  Play,
-  Plus,
-  Search,
-  Smile,
-  Sun,
-  SunDim,
-  Volume1,
-  Volume2,
-  VolumeX,
-} from "lucide-react";
-import type { AccessoryButtonAction, RazerLighting } from "../types";
+import { useEffect, useState } from "react";
+import { ChevronsUpDown, Minus, Plus } from "lucide-react";
+import type { RazerLighting } from "../types";
 import { MacSlider } from "./MacSlider";
-
-// MARK: - Shared Action Metadata (matches AccessoryActions.swift)
-
-export const ACCESSORY_ACTIONS: Array<{ id: AccessoryButtonAction; title: string }> = [
-  { id: "systemDefault", title: "System Default" },
-  { id: "missionControl", title: "Mission Control / Overview" },
-  { id: "appExpose", title: "App Exposé" },
-  { id: "showDesktop", title: "Show Desktop" },
-  { id: "launchpad", title: "App Launcher" },
-  { id: "spaceLeft", title: "Move a Workspace Left" },
-  { id: "spaceRight", title: "Move a Workspace Right" },
-  { id: "navigateBack", title: "Back" },
-  { id: "navigateForward", title: "Forward" },
-  { id: "playPause", title: "Play / Pause Media" },
-  { id: "mutePointerDisplay", title: "Mute Display Under Pointer" },
-  { id: "toggleBuiltinScreen", title: "Toggle Built-in Screen" },
-  { id: "toggleCaffeine", title: "Toggle Caffeine" },
-  { id: "toggleWheelMode", title: "Toggle Ratchet / Free-Spin" },
-  { id: "copy", title: "Copy" },
-  { id: "paste", title: "Paste" },
-];
-
-export const GENERAL_ACTIONS = ACCESSORY_ACTIONS.filter((a) => a.id !== "toggleWheelMode");
-
-export function actionTitle(action: AccessoryButtonAction, defaultTitle?: string): string {
-  if (action === "systemDefault" && defaultTitle) return defaultTitle;
-  return ACCESSORY_ACTIONS.find((a) => a.id === action)?.title ?? "System Default";
-}
 
 // MARK: - Native macOS Grouped Form Primitives (matches SettingsComponents.swift)
 
@@ -378,33 +334,6 @@ export function DPIControlRow({
   );
 }
 
-export function ActionPickerRow({
-  title,
-  value,
-  actions = GENERAL_ACTIONS,
-  defaultTitle,
-  onChange,
-}: {
-  title: string;
-  value: AccessoryButtonAction;
-  actions?: Array<{ id: AccessoryButtonAction; title: string }>;
-  defaultTitle?: string;
-  onChange: (next: AccessoryButtonAction) => void;
-}) {
-  return (
-    <LabeledRow title={title}>
-      <MacSelect
-        value={value}
-        options={actions.map((a) => ({
-          value: a.id,
-          label: a.id === "systemDefault" && defaultTitle ? defaultTitle : a.title,
-        }))}
-        onChange={onChange}
-      />
-    </LabeledRow>
-  );
-}
-
 export function ColorPickerRow({
   title,
   hex,
@@ -430,128 +359,6 @@ export function ColorPickerRow({
         />
       </label>
     </LabeledRow>
-  );
-}
-
-// MARK: - MX Keyboard KeyRowPicker (exact port of Swift KeyRowPicker)
-
-interface KeyDef {
-  position: number;
-  label: string;
-  icon: React.ReactNode;
-  divertable: boolean;
-}
-
-const MX_FUNCTION_KEYS: KeyDef[] = [
-  { position: 1, label: "F1", icon: <span className="text-[10px] font-bold">1</span>, divertable: false },
-  { position: 2, label: "F2", icon: <span className="text-[10px] font-bold">2</span>, divertable: false },
-  { position: 3, label: "F3", icon: <span className="text-[10px] font-bold">3</span>, divertable: false },
-  { position: 4, label: "F4", icon: <SunDim className="h-[11px] w-[11px]" />, divertable: true },
-  { position: 5, label: "F5", icon: <Sun className="h-[11px] w-[11px]" />, divertable: true },
-  { position: 6, label: "F6", icon: <Mic className="h-[11px] w-[11px]" />, divertable: true },
-  { position: 7, label: "F7", icon: <Smile className="h-[11px] w-[11px]" />, divertable: true },
-  { position: 8, label: "F8", icon: <Camera className="h-[11px] w-[11px]" />, divertable: true },
-  { position: 9, label: "F9", icon: <MicOff className="h-[11px] w-[11px]" />, divertable: true },
-  { position: 10, label: "F10", icon: <Play className="h-[11px] w-[11px]" />, divertable: true },
-  { position: 11, label: "F11", icon: <VolumeX className="h-[11px] w-[11px]" />, divertable: true },
-  { position: 12, label: "F12", icon: <Volume2 className="h-[11px] w-[11px]" />, divertable: true },
-];
-
-// Unused lucide imports guard for future key variants
-void Search;
-void Volume1;
-
-export function KeyRowPicker({
-  keyActions,
-  onSelect,
-}: {
-  keyActions: Record<string, AccessoryButtonAction>;
-  onSelect: (position: number, action: AccessoryButtonAction) => void;
-}) {
-  const [openKey, setOpenKey] = useState<number | null>(null);
-  const containerRef = useRef<HTMLDivElement | null>(null);
-
-  useEffect(() => {
-    if (openKey === null) return;
-    const onDown = (e: MouseEvent) => {
-      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
-        setOpenKey(null);
-      }
-    };
-    window.addEventListener("mousedown", onDown);
-    return () => window.removeEventListener("mousedown", onDown);
-  }, [openKey]);
-
-  return (
-    <div ref={containerRef} className="relative px-4 py-3.5">
-      <div className="flex items-center justify-between gap-[4px]">
-        {MX_FUNCTION_KEYS.map((key) => {
-          const current = keyActions[String(key.position)] ?? "systemDefault";
-          const remapped = current !== "systemDefault";
-          return (
-            <div key={key.position} className="relative">
-              <button
-                type="button"
-                disabled={!key.divertable}
-                onClick={() =>
-                  setOpenKey((cur) => (cur === key.position ? null : key.position))
-                }
-                title={
-                  !key.divertable
-                    ? `${key.label}: Easy-Switch (cannot be remapped)`
-                    : remapped
-                      ? `${key.label}: ${actionTitle(current)}`
-                      : `${key.label}: Key's Own Function`
-                }
-                className={`flex h-[38px] w-[36px] flex-col items-center justify-center gap-[2px] rounded-[7px] border transition-colors ${
-                  !key.divertable
-                    ? "cursor-not-allowed border-white/[0.14] bg-white/[0.02] text-white/30 opacity-45"
-                    : remapped
-                      ? "border-[#0a84ff] bg-[#0a84ff]/[0.18] text-white shadow-[0_0_8px_rgba(10,132,255,0.25)]"
-                      : "border-white/[0.22] bg-white/[0.03] text-white/80 hover:border-white/40 hover:bg-white/[0.08]"
-                }`}
-              >
-                <span>{key.icon}</span>
-                <span className="text-[8px] font-semibold tracking-tight text-white/55">
-                  {key.label}
-                </span>
-              </button>
-
-              {openKey === key.position && (
-                <div
-                  className={`aeron-menu absolute top-[42px] z-50 max-h-[240px] w-[204px] overflow-y-auto p-[5px] text-[12px] ${
-                    key.position >= 9 ? "right-0" : "left-0"
-                  }`}
-                >
-                  <div className="px-2.5 py-1 text-[10px] font-semibold text-white/45">
-                    {key.label} Action
-                  </div>
-                  {GENERAL_ACTIONS.map((opt) => {
-                    const selected = current === opt.id;
-                    const label =
-                      opt.id === "systemDefault" ? "Key's Own Function" : opt.title;
-                    return (
-                      <button
-                        key={opt.id}
-                        type="button"
-                        onClick={() => {
-                          onSelect(key.position, opt.id);
-                          setOpenKey(null);
-                        }}
-                        className="flex w-full items-center justify-between rounded-[6px] px-2.5 py-[5px] text-left text-white/90 hover:bg-[#0a84ff] hover:text-white"
-                      >
-                        <span className="truncate">{label}</span>
-                        {selected && <Check className="h-3 w-3 shrink-0" />}
-                      </button>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-          );
-        })}
-      </div>
-    </div>
   );
 }
 
