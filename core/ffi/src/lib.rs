@@ -1349,6 +1349,11 @@ impl AeronEngine {
         self.core.snapshot().into()
     }
 
+    /// Accessory state only. Cheap enough to poll; `snapshot` also reads displays and sensors.
+    pub fn accessories_snapshot(&self) -> CoreAccessoriesSnapshot {
+        self.core.accessories_snapshot().into()
+    }
+
     pub fn snapshot_json(&self) -> Result<String, AeronEngineError> {
         serde_json::to_string(&self.core.snapshot())
             .map_err(|err| AeronEngineError::OperationFailed {

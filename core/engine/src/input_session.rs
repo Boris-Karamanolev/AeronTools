@@ -142,6 +142,7 @@ fn reader(
     }
     let mut last_battery = Instant::now();
     let mut last_discover = Instant::now();
+    let mut smoothing = false;
     while !stop.load(Ordering::Relaxed) {
         let needs_discover = runtime.lock().ok().is_some_and(|live| {
             live.mx.as_ref().is_some_and(|mx| mx.features.reprog.is_none() && mx.features.wheel.is_none())
@@ -156,14 +157,24 @@ fn reader(
                 apply(&dev, &mut live);
             }
         }
-        let report = {
-            let Ok(dev) = device.lock() else {
-                break;
-            };
-            let mut buf = [0u8; 64];
-            match dev.read_timeout(&mut buf, 8) {
-                Ok(0) | Err(_) => None,
-                Ok(n) => Some(buf[..n].to_vec()),
+        let report = match take_deferred_report() {
+            Some(report) => Some(report),
+            None => {
+                let Ok(dev) = device.lock() else {
+                    break;
+                };
+                let mut buf = [0u8; 64];
+                // Smooth scrolling steps every frame; otherwise wake only for reports and queued writes.
+                let timeout = if smoothing { 8 } else { 50 };
+                match dev.read_timeout(&mut buf, timeout) {
+                    Ok(0) => None,
+                    Ok(n) => Some(buf[..n].to_vec()),
+                    Err(_) => {
+                        drop(dev);
+                        std::thread::sleep(Duration::from_millis(50));
+                        None
+                    }
+                }
             }
         };
         if stop.load(Ordering::Relaxed) {
@@ -224,9 +235,11 @@ fn reader(
                     effects.extend(mouse.handle_report(report));
                 }
             }
+            smoothing = false;
             if let Some(mx) = live.mx.as_mut() {
                 if let Some(effect) = mx.step_smooth() {
                     effects.push(effect);
+                    smoothing = true;
                 }
             }
             if live.mx.as_ref().is_some_and(|mx| mx.dirty)
@@ -1137,18 +1150,46 @@ fn resolve(dev: &HidDevice, device_index: u8, feature_id: u16) -> Option<u8> {
     hidpp::parse_feature_index_reply(&reply)
 }
 
+thread_local! {
+    /// Input reports that arrived while `exchange` waited for a reply (diverted buttons, wheel
+    /// notches, gesture motion). The session loop handles them before reading new ones.
+    static DEFERRED_REPORTS: std::cell::RefCell<std::collections::VecDeque<Vec<u8>>> =
+        const { std::cell::RefCell::new(std::collections::VecDeque::new()) };
+}
+
+fn defer_report(report: &[u8]) {
+    DEFERRED_REPORTS.with(|queue| {
+        let mut queue = queue.borrow_mut();
+        if queue.len() >= 256 {
+            queue.pop_front();
+        }
+        queue.push_back(report.to_vec());
+    });
+}
+
+fn take_deferred_report() -> Option<Vec<u8>> {
+    DEFERRED_REPORTS.with(|queue| queue.borrow_mut().pop_front())
+}
+
 fn exchange(dev: &HidDevice, packet: &[u8; 20]) -> Option<Vec<u8>> {
     dev.write(packet).ok()?;
     let mut buf = [0u8; 64];
-    for _ in 0..8 {
-        let n = dev.read_timeout(&mut buf, 180).ok()?;
+    let deadline = Instant::now() + Duration::from_millis(180);
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return None;
+        }
+        let n = dev.read_timeout(&mut buf, left.as_millis().max(1) as i32).ok()?;
         if n == 0 {
             return None;
         }
         let Some(norm) = hidpp::normalize_report(&buf[..n]) else {
+            defer_report(&buf[..n]);
             continue;
         };
         if norm.len() < 5 || norm[1] != packet[1] {
+            defer_report(&buf[..n]);
             continue;
         }
         if (norm[2] == 0xFF || norm[2] == 0x8F) && norm[3] == packet[2] && norm[4] == packet[3] {
@@ -1157,6 +1198,6 @@ fn exchange(dev: &HidDevice, packet: &[u8; 20]) -> Option<Vec<u8>> {
         if norm[2] == packet[2] && norm[3] == packet[3] {
             return Some(norm);
         }
+        defer_report(&buf[..n]);
     }
-    None
 }

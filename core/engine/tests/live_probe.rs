@@ -97,6 +97,6 @@ fn live_hid_diagnostic() {
         println!("Satechi: {satechi:#?}");
         mgr.set_dock_layouts(razer, satechi);
     }
-    mgr.refresh();
+    mgr.refresh(true, false);
     println!("{:#?}", mgr.snapshot());
 }

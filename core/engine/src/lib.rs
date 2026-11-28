@@ -46,6 +46,7 @@ use hid_devices::HidManager;
 use tracing::warn;
 
 const TELEMETRY_CACHE_TTL: Duration = Duration::from_millis(1500);
+const GAME_MODE_CACHE_TTL: Duration = Duration::from_secs(10);
 
 pub trait PlatformBackend: Send {
     fn platform_name(&self) -> &'static str;
@@ -116,6 +117,8 @@ struct InnerState {
     caffeine: CaffeineState,
     preferences: AppPreferences,
     cached_telemetry: Option<(Instant, WattageSnapshot, ThermalSnapshot)>,
+    /// Reading Game Mode runs a helper process (gamepolicyctl, reg, gamemoded) on every platform.
+    cached_game_mode: Option<(Instant, GameModeState)>,
     /// The menu-bar app keeps brightness schedules, extra dimming, and auto-off.
     /// The engine still performs the DDC write when asked, and does not toggle the panel itself.
     drive_display_policy: bool,
@@ -129,6 +132,8 @@ struct PrefsSaveState {
 
 struct WatchWake {
     force_hid: bool,
+    /// The forced scan follows a system wake: devices may have power-cycled and lost host settings.
+    woke: bool,
     replies: Vec<mpsc::Sender<()>>,
     shutdown: bool,
 }
@@ -186,6 +191,7 @@ impl AeronCore {
             },
             preferences,
             cached_telemetry: None,
+            cached_game_mode: None,
             drive_display_policy,
         }));
         let hid = Arc::new(Mutex::new(hid_mgr));
@@ -250,6 +256,7 @@ impl AeronCore {
         let watch = Arc::new((
             Mutex::new(WatchWake {
                 force_hid: false,
+                woke: false,
                 replies: Vec::new(),
                 shutdown: false,
             }),
@@ -264,7 +271,7 @@ impl AeronCore {
                     (watcher_hid.upgrade(), watcher_hid_snap.upgrade())
                 {
                     if let Ok(mut h) = hid_arc.lock() {
-                        h.refresh();
+                        h.refresh(true, false);
                         let latest = h.snapshot();
                         if let Ok(mut snap) = snap_arc.lock() {
                             *snap = latest;
@@ -275,7 +282,7 @@ impl AeronCore {
 
                 let mut tick: u64 = 0;
                 loop {
-                    let (force, replies) = {
+                    let (force, woke, replies) = {
                         let Some(wake) = watcher_wake.upgrade() else {
                             break;
                         };
@@ -301,10 +308,11 @@ impl AeronCore {
                         }
                         let mut guard = guard;
                         let force = guard.force_hid;
+                        let woke = std::mem::take(&mut guard.woke);
                         guard.force_hid = false;
                         let replies = std::mem::take(&mut guard.replies);
                         drop(guard);
-                        (force, replies)
+                        (force, woke, replies)
                     };
                     tick = tick.wrapping_add(1);
                     let (Some(inner_arc), Some(hid_arc), Some(snap_arc)) = (
@@ -325,11 +333,13 @@ impl AeronCore {
                             }
                             continue;
                         };
+                        // A timed keep-awake ends on time even while no UI is polling snapshots.
+                        AeronCore::check_caffeine_expiry(&mut guard);
+                        // The menu-bar process doesn't poll displays: Swift owns display state there,
+                        // and writes find their DDC service on demand.
                         if guard.drive_display_policy {
                             let auto_off = guard.preferences.auto_turn_off_builtin;
                             guard.backend.poll_display_topology(auto_off);
-                        } else if tick % 4 == 0 {
-                            let _ = guard.backend.refresh_displays();
                         }
                         force || tick % 4 == 0
                     };
@@ -346,7 +356,7 @@ impl AeronCore {
                     let hid_guard = hid_arc.lock();
                     if let Ok(mut h) = hid_guard {
                         h.set_dock_layouts(razer, satechi);
-                        h.refresh();
+                        h.refresh(force, woke);
                         let latest = h.snapshot();
                         let snap_guard = snap_arc.lock();
                         if let Ok(mut s) = snap_guard {
@@ -370,12 +380,13 @@ impl AeronCore {
     }
 
     /// Asks the hardware watcher to re-probe HID and docks, and waits until that scan finishes.
-    fn request_hid_refresh(&self) {
+    fn request_hid_refresh(&self, woke: bool) {
         let (tx, rx) = mpsc::channel();
         {
             let (lock, cvar) = &*self.watch;
             if let Ok(mut guard) = lock.lock() {
                 guard.force_hid = true;
+                guard.woke |= woke;
                 guard.replies.push(tx);
                 cvar.notify_one();
             }
@@ -385,7 +396,7 @@ impl AeronCore {
 
     /// Same watcher refresh as a manual rescan. Called when the Mac wakes.
     pub fn system_did_wake(&self) {
-        self.request_hid_refresh();
+        self.request_hid_refresh(true);
     }
 
     fn schedule_preferences_save(&self, prefs: AppPreferences) {
@@ -397,13 +408,21 @@ impl AeronCore {
         }
     }
 
+    /// Accessory state only: a cheap read of what the hardware watcher last published.
+    pub fn accessories_snapshot(&self) -> AccessoriesSnapshot {
+        self.hid_snapshot
+            .lock()
+            .expect("hid_snapshot mutex poisoned")
+            .clone()
+    }
+
     pub fn snapshot(&self) -> AppSnapshot {
         let mut guard = self.inner.lock().expect("AeronCore mutex poisoned");
         Self::check_caffeine_expiry(&mut guard);
 
         let displays = guard.backend.displays();
         let builtin_display = guard.backend.builtin_display_state();
-        let game_mode = guard.backend.read_game_mode();
+        let game_mode = Self::game_mode(&mut guard);
 
         let (wattage, thermals) = match &guard.cached_telemetry {
             Some((at, w, t)) if at.elapsed() < TELEMETRY_CACHE_TTL => (w.clone(), t.clone()),
@@ -444,7 +463,7 @@ impl AeronCore {
     /// Fast refresh of dock port topology and HID accessories without holding the display lock
     /// during slow USB/HID probing.
     pub fn refresh_accessories_and_docks(&self) {
-        self.request_hid_refresh();
+        self.request_hid_refresh(false);
     }
 
     pub fn refresh_all(&self) -> AppSnapshot {
@@ -453,7 +472,7 @@ impl AeronCore {
             guard.backend.refresh_displays();
             guard.cached_telemetry = None;
         }
-        self.request_hid_refresh();
+        self.request_hid_refresh(false);
         self.snapshot()
     }
 
@@ -584,15 +603,16 @@ impl AeronCore {
     pub fn set_game_mode_policy(&self, policy: GameModePolicy) -> Result<AppSnapshot, String> {
         {
             let mut guard = self.inner.lock().expect("AeronCore mutex poisoned");
-            guard.backend.set_game_mode_policy(policy)?;
+            let state = guard.backend.set_game_mode_policy(policy)?;
+            guard.cached_game_mode = Some((Instant::now(), state));
         }
         Ok(self.snapshot())
     }
 
     pub fn toggle_game_mode_forced(&self) -> Result<AppSnapshot, String> {
         let current = {
-            let guard = self.inner.lock().expect("AeronCore mutex poisoned");
-            guard.backend.read_game_mode().policy
+            let mut guard = self.inner.lock().expect("AeronCore mutex poisoned");
+            Self::game_mode(&mut guard).policy
         };
         let next = if current == GameModePolicy::ForcedOn {
             GameModePolicy::Automatic
@@ -789,6 +809,17 @@ impl AeronCore {
         lighting: Option<RazerLighting>,
     ) -> AppSnapshot {
         self.with_hid(|h| h.set_razer_dock_lighting(brightness, lighting))
+    }
+
+    fn game_mode(guard: &mut InnerState) -> GameModeState {
+        if let Some((at, state)) = &guard.cached_game_mode {
+            if at.elapsed() < GAME_MODE_CACHE_TTL {
+                return state.clone();
+            }
+        }
+        let state = guard.backend.read_game_mode();
+        guard.cached_game_mode = Some((Instant::now(), state.clone()));
+        state
     }
 
     fn check_caffeine_expiry(guard: &mut InnerState) {

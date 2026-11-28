@@ -583,6 +583,11 @@ nonisolated fileprivate struct FfiConverterData: FfiConverterRustBuffer {
  */
 nonisolated public protocol AeronEngineProtocol : AnyObject {
     
+    /**
+     * Accessory state only. Cheap enough to poll; `snapshot` also reads displays and sensors.
+     */
+    func accessoriesSnapshot()  -> CoreAccessoriesSnapshot
+    
     func prepareForTermination() 
     
     func refreshAccessoriesAndDocks() 
@@ -708,6 +713,16 @@ public convenience init() {
 
     
 
+    
+    /**
+     * Accessory state only. Cheap enough to poll; `snapshot` also reads displays and sensors.
+     */
+open func accessoriesSnapshot() -> CoreAccessoriesSnapshot {
+    return try!  FfiConverterTypeCoreAccessoriesSnapshot.lift(try! rustCall() {
+    uniffi_aeron_ffi_fn_method_aeronengine_accessories_snapshot(self.uniffiClonePointer(),$0
+    )
+})
+}
     
 open func prepareForTermination() {try! rustCall() {
     uniffi_aeron_ffi_fn_method_aeronengine_prepare_for_termination(self.uniffiClonePointer(),$0
@@ -5990,6 +6005,9 @@ nonisolated private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_aeron_ffi_checksum_func_aeron_engine_version() != 53734) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_aeron_ffi_checksum_method_aeronengine_accessories_snapshot() != 33059) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_aeron_ffi_checksum_method_aeronengine_prepare_for_termination() != 31823) {
