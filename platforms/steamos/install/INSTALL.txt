@@ -8,7 +8,7 @@ Desktop Mode, and other Linux desktops:
 
 SteamOS Gaming Mode:
   Gaming Mode does not run the AppImage. It runs aeron-daemon and the Decky plugin.
-  From Desktop Mode:
+  From Desktop Mode, as the deck user (no sudo; it asks for your password itself):
     chmod +x install-steamos.sh
     ./install-steamos.sh --udev
   Open Aeron Tools from the Quick Access menu after Decky restarts.

@@ -47,9 +47,6 @@ pub fn run() {
                         Code::KeyG => {
                             let _ = shortcut_core.toggle_game_mode_forced();
                         }
-                        Code::KeyB => {
-                            let _ = shortcut_core.toggle_builtin_display();
-                        }
                         Code::F2 => {
                             let _ = shortcut_core.step_all_brightness(0.1);
                         }
@@ -84,7 +81,6 @@ pub fn run() {
                 "Ctrl+Alt+F2",
                 "Ctrl+Alt+C",
                 "Ctrl+Alt+G",
-                "Ctrl+Alt+B",
             ] {
                 if let Err(err) = app.global_shortcut().register(accel) {
                     warn!("Could not register global shortcut {accel}: {err}");
@@ -94,13 +90,6 @@ pub fn run() {
             // Build native system tray icon and menu
             let show_item = MenuItem::with_id(app, "show", "Show Aeron Tools", true, None::<&str>)?;
             let settings_item = MenuItem::with_id(app, "settings", "Settings…", true, None::<&str>)?;
-            let builtin_item = MenuItem::with_id(
-                app,
-                "builtin",
-                "Toggle Built-in Screen",
-                true,
-                None::<&str>,
-            )?;
             let caffeine_item =
                 MenuItem::with_id(app, "caffeine", "Toggle Caffeine", true, None::<&str>)?;
             let gamemode_item =
@@ -114,7 +103,6 @@ pub fn run() {
                 &[
                     &show_item,
                     &settings_item,
-                    &builtin_item,
                     &caffeine_item,
                     &gamemode_item,
                     &refresh_item,
@@ -129,9 +117,6 @@ pub fn run() {
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "show" => toggle_main_window(app, true, None),
                     "settings" => commands::open_settings(app.clone(), Some("general".into()), None),
-                    "builtin" => {
-                        let _ = app.state::<AeronCore>().toggle_builtin_display();
-                    }
                     "caffeine" => {
                         let _ = app.state::<AeronCore>().toggle_caffeine();
                     }
@@ -220,8 +205,6 @@ pub fn run() {
             commands::set_display_volume,
             commands::set_display_muted,
             commands::set_display_input,
-            commands::set_builtin_display_enabled,
-            commands::toggle_builtin_display,
             commands::set_caffeine,
             commands::toggle_caffeine,
             commands::set_game_mode_policy,
@@ -229,17 +212,13 @@ pub fn run() {
             commands::update_preferences,
             commands::set_mx_master_dpi,
             commands::set_mx_master_smart_shift,
-            commands::set_mx_master_options,
             commands::set_logitech_g_dpi,
             commands::set_logitech_g_report_rate,
             commands::set_logitech_g_triggers,
-            commands::set_logitech_g_options,
             commands::set_mx_keyboard_backlight,
             commands::set_mx_keyboard_fn_inversion,
-            commands::set_mx_keyboard_key_action,
             commands::set_g_keyboard_lighting,
             commands::set_keychron_settings,
-            commands::set_keychron_side_buttons,
             commands::set_razer_dock_lighting,
             commands::open_settings,
             commands::resize_popover,

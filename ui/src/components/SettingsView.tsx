@@ -11,14 +11,11 @@ import {
   Sliders,
 } from "lucide-react";
 import type {
-  AccessoryButtonAction,
   AppPreferences,
   AppSnapshot,
   BacklightEffect,
   BreathingStyle,
   GameModePolicy,
-  MxMasterOptions,
-  MxThumbwheelAction,
   MxWheelMode,
   RazerLighting,
   RazerMode,
@@ -32,12 +29,9 @@ import { formatConnectionLabel } from "./AccessoriesSection";
 import { DisplayCard } from "./DisplayCard";
 import { DockPortsView } from "./DockPortsView";
 import {
-  ACCESSORY_ACTIONS,
-  ActionPickerRow,
   ChromaGlowBar,
   ColorPickerRow,
   DPIControlRow,
-  KeyRowPicker,
   LabeledRow,
   LevelSliderRow,
   MacSegmented,
@@ -62,18 +56,11 @@ interface SettingsViewProps {
   onDisplayVolume: (id: string, level: number) => void;
   onDisplayMute: (id: string, muted: boolean) => void;
   onDisplayInput: (id: string, code: number) => void;
-  onToggleBuiltinDisplay: () => void;
   onMxMasterDpi: (dpi: number) => void;
   onMxMasterSmartShift: (mode: MxWheelMode, enabled: boolean, threshold: number) => void;
-  onMxMasterOptions: (options: MxMasterOptions) => void;
   onLogitechGDpi: (dpi: number) => void;
   onLogitechGReportRate: (hz: number) => void;
   onLogitechGTriggers: (triggers: TriggerSettings) => void;
-  onLogitechGOptions: (
-    backButton: AccessoryButtonAction,
-    forwardButton: AccessoryButtonAction,
-    savesToOnboardProfile: boolean
-  ) => void;
   onMxKeyboardBacklight: (params: {
     enabled: boolean;
     autoBrightness: boolean;
@@ -83,7 +70,6 @@ interface SettingsViewProps {
     effect: BacklightEffect;
   }) => void;
   onMxKeyboardFnInversion: (standardFn: boolean) => void;
-  onMxKeyboardKeyAction: (position: number, action: AccessoryButtonAction) => void;
   onGKeyboardLighting: (brightness: number, lighting: RgbLighting) => void;
   onKeychronUpdate: (params: {
     activeStage: number;
@@ -93,10 +79,6 @@ interface SettingsViewProps {
     motionSync: boolean;
     angleSnapping: boolean;
   }) => void;
-  onKeychronSideButtons: (
-    backButton: AccessoryButtonAction,
-    forwardButton: AccessoryButtonAction
-  ) => void;
   onRazerDockLighting: (brightness: number | null, lighting: RazerLighting | null) => void;
 }
 
@@ -128,15 +110,6 @@ const RAZER_MODE_LABELS: Record<RazerMode, string> = {
   spectrum: "Spectrum Cycling",
   wave: "Wave",
 };
-
-const THUMBWHEEL_OPTIONS: Array<{ value: MxThumbwheelAction; label: string }> = [
-  { value: "horizontalScroll", label: "Horizontal Scroll" },
-  { value: "displayBrightness", label: "Brightness (Display Under Pointer)" },
-  { value: "displayVolume", label: "Volume (Display Under Pointer)" },
-  { value: "switchWorkspaces", label: "Switch Desktop Spaces" },
-  { value: "switchTabs", label: "Switch Browser / App Tabs" },
-  { value: "zoom", label: "Zoom In / Out" },
-];
 
 function rgbToHex(r: number, g: number, b: number): string {
   return `#${[r, g, b].map((c) => c.toString(16).padStart(2, "0")).join("")}`;
@@ -179,20 +152,15 @@ export function SettingsView({
   onDisplayVolume,
   onDisplayMute,
   onDisplayInput,
-  onToggleBuiltinDisplay,
   onMxMasterDpi,
   onMxMasterSmartShift,
-  onMxMasterOptions,
   onLogitechGDpi,
   onLogitechGReportRate,
   onLogitechGTriggers,
-  onLogitechGOptions,
   onMxKeyboardBacklight,
   onMxKeyboardFnInversion,
-  onMxKeyboardKeyAction,
   onGKeyboardLighting,
   onKeychronUpdate,
-  onKeychronSideButtons,
   onRazerDockLighting,
 }: SettingsViewProps) {
   const firstConnectedAccessory = (a: AppSnapshot["accessories"]): AccessoryKey | null => {
@@ -248,29 +216,6 @@ export function SettingsView({
     onUpdatePreferences({ ...prefs, [key]: value });
   };
 
-  const updateMxOptions = (patch: Partial<MxMasterOptions>) => {
-    const m = acc.mxMaster;
-    onMxMasterOptions({
-      standardVerticalScroll: m.standardVerticalScroll,
-      smoothScrolling: m.smoothScrolling,
-      scrollSpeedMultiplier: m.scrollSpeedMultiplier,
-      thumbwheelAction: m.thumbwheelAction,
-      invertThumbwheel: m.invertThumbwheel,
-      middleButtonAction: m.middleButtonAction,
-      backButtonAction: m.backButtonAction,
-      forwardButtonAction: m.forwardButtonAction,
-      gestureButtonAction: m.gestureButtonAction,
-      modeShiftButtonAction: m.modeShiftButtonAction,
-      hapticPanelButtonAction: m.hapticPanelButtonAction,
-      gesturesEnabled: m.gesturesEnabled,
-      gestureUpAction: m.gestureUpAction,
-      gestureDownAction: m.gestureDownAction,
-      gestureLeftAction: m.gestureLeftAction,
-      gestureRightAction: m.gestureRightAction,
-      savesToMouse: m.savesToMouse,
-      ...patch,
-    });
-  };
 
   const accessoryCatalog: Array<{
     key: AccessoryKey;
@@ -518,7 +463,9 @@ export function SettingsView({
             </SettingsSection>
 
             <SettingsSection title="Global Shortcuts">
-              {prefs.hotkeys.map((hk) => (
+              {prefs.hotkeys
+                .filter((hk) => hk.action !== "toggleBuiltinScreen")
+                .map((hk) => (
                 <LabeledRow key={hk.action} title={hk.label}>
                   <kbd className="font-mono-tabular rounded-[5px] border border-white/[0.14] bg-white/[0.07] px-2 py-[2.5px] text-[11px] font-medium text-white/80 shadow-[inset_0_0.5px_0_rgba(255,255,255,0.1)]">
                     {hk.accelerator ?? "Not Set"}
@@ -543,40 +490,6 @@ export function SettingsView({
         {/* ======================== DISPLAYS TAB ======================== */}
         {tab === "displays" && (
           <div className="mx-auto max-w-[540px] space-y-6">
-            {snapshot.builtinDisplay?.present && (
-              <SettingsSection
-                title={snapshot.platform === "macos" ? "MacBook Screen" : "Built-in Screen"}
-                footer="Automatically turns off the built-in screen when an external monitor connects and restores it immediately when external monitors disconnect."
-              >
-                <LabeledRow
-                  title={snapshot.builtinDisplay.isTurnedOff ? "Turned Off" : "Active"}
-                  subtitle={
-                    snapshot.builtinDisplay.canTurnOff || snapshot.builtinDisplay.isTurnedOff
-                      ? undefined
-                      : "Connect an external monitor to turn off the built-in screen"
-                  }
-                >
-                  <StatusDot isActive={!snapshot.builtinDisplay.isTurnedOff} />
-                  <button
-                    type="button"
-                    disabled={
-                      !snapshot.builtinDisplay.canTurnOff && !snapshot.builtinDisplay.isTurnedOff
-                    }
-                    onClick={onToggleBuiltinDisplay}
-                    className="aeron-btn disabled:opacity-40"
-                  >
-                    {snapshot.builtinDisplay.isTurnedOff ? "Turn Screen On" : "Turn Screen Off"}
-                  </button>
-                </LabeledRow>
-                <LabeledRow title="Turn off automatically when an external screen is connected">
-                  <MacToggle
-                    checked={prefs.autoTurnOffBuiltin}
-                    onChange={(v) => setPref("autoTurnOffBuiltin", v)}
-                  />
-                </LabeledRow>
-              </SettingsSection>
-            )}
-
             <SettingsSection
               title="Monitor Controls"
               footer="Settings are saved per display EDID identity and restored automatically when monitors reconnect."
@@ -831,143 +744,6 @@ export function SettingsView({
                   )}
                 </SettingsSection>
 
-                <SettingsSection
-                  title="Scrolling"
-                  footer="Only this mouse is affected; trackpads and other mice keep the system setting."
-                >
-                  <LabeledRow title="Standard scroll direction">
-                    <MacToggle
-                      checked={acc.mxMaster.standardVerticalScroll}
-                      onChange={(v) => updateMxOptions({ standardVerticalScroll: v })}
-                    />
-                  </LabeledRow>
-                  <LabeledRow title="Smooth scrolling">
-                    <MacToggle
-                      checked={acc.mxMaster.smoothScrolling}
-                      onChange={(v) => updateMxOptions({ smoothScrolling: v })}
-                    />
-                  </LabeledRow>
-                  <LevelSliderRow
-                    title="Scroll Speed"
-                    value={acc.mxMaster.scrollSpeedMultiplier}
-                    min={0.5}
-                    max={3.0}
-                    step={0.25}
-                    format={(v) => `${v.toFixed(2)}×`}
-                    onChange={(v) => updateMxOptions({ scrollSpeedMultiplier: v })}
-                  />
-                </SettingsSection>
-
-                <SettingsSection title="Thumbwheel">
-                  <LabeledRow title="Action">
-                    <MacSelect<MxThumbwheelAction>
-                      value={acc.mxMaster.thumbwheelAction}
-                      options={THUMBWHEEL_OPTIONS}
-                      onChange={(v) => updateMxOptions({ thumbwheelAction: v })}
-                    />
-                  </LabeledRow>
-                  <LabeledRow title="Invert direction">
-                    <MacToggle
-                      checked={acc.mxMaster.invertThumbwheel}
-                      onChange={(v) => updateMxOptions({ invertThumbwheel: v })}
-                    />
-                  </LabeledRow>
-                </SettingsSection>
-
-                <SettingsSection
-                  title="Buttons"
-                  footer="Only this mouse's buttons change. System Default keeps each button's normal behavior."
-                >
-                  <ActionPickerRow
-                    title="Middle Button"
-                    value={acc.mxMaster.middleButtonAction}
-                    actions={ACCESSORY_ACTIONS}
-                    onChange={(v) => updateMxOptions({ middleButtonAction: v })}
-                  />
-                  <ActionPickerRow
-                    title="Back Button"
-                    value={acc.mxMaster.backButtonAction}
-                    actions={ACCESSORY_ACTIONS}
-                    onChange={(v) => updateMxOptions({ backButtonAction: v })}
-                  />
-                  <ActionPickerRow
-                    title="Forward Button"
-                    value={acc.mxMaster.forwardButtonAction}
-                    actions={ACCESSORY_ACTIONS}
-                    onChange={(v) => updateMxOptions({ forwardButtonAction: v })}
-                  />
-                  <ActionPickerRow
-                    title="Thumb Button"
-                    value={acc.mxMaster.gestureButtonAction}
-                    actions={ACCESSORY_ACTIONS}
-                    onChange={(v) => updateMxOptions({ gestureButtonAction: v })}
-                  />
-                  <ActionPickerRow
-                    title="Button Behind Wheel"
-                    value={acc.mxMaster.modeShiftButtonAction}
-                    actions={ACCESSORY_ACTIONS}
-                    defaultTitle="System Default (Ratchet / Free-Spin)"
-                    onChange={(v) => updateMxOptions({ modeShiftButtonAction: v })}
-                  />
-                  <ActionPickerRow
-                    title="Haptic Panel"
-                    value={acc.mxMaster.hapticPanelButtonAction}
-                    actions={ACCESSORY_ACTIONS}
-                    onChange={(v) => updateMxOptions({ hapticPanelButtonAction: v })}
-                  />
-                </SettingsSection>
-
-                <SettingsSection
-                  title="Gestures"
-                  footer="Hold the thumb button or haptic panel and move the mouse in a direction."
-                >
-                  <LabeledRow title="Hold & drag gestures">
-                    <MacToggle
-                      checked={acc.mxMaster.gesturesEnabled}
-                      onChange={(v) => updateMxOptions({ gesturesEnabled: v })}
-                    />
-                  </LabeledRow>
-                  {acc.mxMaster.gesturesEnabled && (
-                    <>
-                      <ActionPickerRow
-                        title="Up"
-                        value={acc.mxMaster.gestureUpAction}
-                        actions={ACCESSORY_ACTIONS}
-                        onChange={(v) => updateMxOptions({ gestureUpAction: v })}
-                      />
-                      <ActionPickerRow
-                        title="Down"
-                        value={acc.mxMaster.gestureDownAction}
-                        actions={ACCESSORY_ACTIONS}
-                        onChange={(v) => updateMxOptions({ gestureDownAction: v })}
-                      />
-                      <ActionPickerRow
-                        title="Left"
-                        value={acc.mxMaster.gestureLeftAction}
-                        actions={ACCESSORY_ACTIONS}
-                        onChange={(v) => updateMxOptions({ gestureLeftAction: v })}
-                      />
-                      <ActionPickerRow
-                        title="Right"
-                        value={acc.mxMaster.gestureRightAction}
-                        actions={ACCESSORY_ACTIONS}
-                        onChange={(v) => updateMxOptions({ gestureRightAction: v })}
-                      />
-                    </>
-                  )}
-                </SettingsSection>
-
-                <SettingsSection
-                  title="Onboard Memory"
-                  footer="Saves buttons set to Back, Forward, or Ratchet / Free-Spin to the mouse so they keep working without Aeron Tools."
-                >
-                  <LabeledRow title="Save settings to the mouse">
-                    <MacToggle
-                      checked={acc.mxMaster.savesToMouse}
-                      onChange={(v) => updateMxOptions({ savesToMouse: v })}
-                    />
-                  </LabeledRow>
-                </SettingsSection>
               </>
             )}
 
@@ -1035,51 +811,6 @@ export function SettingsView({
                   />
                 </SettingsSection>
 
-                <SettingsSection
-                  title="Side Buttons"
-                  footer="Only this mouse's side buttons change. System Default keeps the normal back and forward behavior."
-                >
-                  <ActionPickerRow
-                    title="Back Button"
-                    value={acc.logitechGMouse.backButtonAction}
-                    onChange={(v) =>
-                      onLogitechGOptions(
-                        v,
-                        acc.logitechGMouse.forwardButtonAction,
-                        acc.logitechGMouse.savesToOnboardProfile
-                      )
-                    }
-                  />
-                  <ActionPickerRow
-                    title="Forward Button"
-                    value={acc.logitechGMouse.forwardButtonAction}
-                    onChange={(v) =>
-                      onLogitechGOptions(
-                        acc.logitechGMouse.backButtonAction,
-                        v,
-                        acc.logitechGMouse.savesToOnboardProfile
-                      )
-                    }
-                  />
-                </SettingsSection>
-
-                <SettingsSection
-                  title="Onboard Memory"
-                  footer="Saves DPI, report rate, triggers, and side buttons to the mouse's onboard profile with CRC verification so they persist without Aeron Tools."
-                >
-                  <LabeledRow title="Save settings to the mouse">
-                    <MacToggle
-                      checked={acc.logitechGMouse.savesToOnboardProfile}
-                      onChange={(v) =>
-                        onLogitechGOptions(
-                          acc.logitechGMouse.backButtonAction,
-                          acc.logitechGMouse.forwardButtonAction,
-                          v
-                        )
-                      }
-                    />
-                  </LabeledRow>
-                </SettingsSection>
               </>
             )}
 
@@ -1226,15 +957,6 @@ export function SettingsView({
                   </LabeledRow>
                 </SettingsSection>
 
-                <SettingsSection
-                  title="Key Remapping"
-                  footer="Click a key to choose its action. Easy-Switch keys (F1–F3) can't be remapped. Quit Logi Options+ so it doesn't intercept the same keys."
-                >
-                  <KeyRowPicker
-                    keyActions={acc.mxKeyboard.keyActions}
-                    onSelect={onMxKeyboardKeyAction}
-                  />
-                </SettingsSection>
               </>
             )}
 
@@ -1447,25 +1169,6 @@ export function SettingsView({
                   </LabeledRow>
                 </SettingsSection>
 
-                <SettingsSection
-                  title="Side Buttons"
-                  footer="Saved to the mouse so buttons keep working without Aeron Tools and over Bluetooth."
-                >
-                  <ActionPickerRow
-                    title="Back Button"
-                    value={acc.keychronM3Mini.backButtonAction}
-                    onChange={(v) =>
-                      onKeychronSideButtons(v, acc.keychronM3Mini.forwardButtonAction)
-                    }
-                  />
-                  <ActionPickerRow
-                    title="Forward Button"
-                    value={acc.keychronM3Mini.forwardButtonAction}
-                    onChange={(v) =>
-                      onKeychronSideButtons(acc.keychronM3Mini.backButtonAction, v)
-                    }
-                  />
-                </SettingsSection>
               </>
             )}
 
